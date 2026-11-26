@@ -94,6 +94,51 @@
   transform-origin: 34px 19px;
 }
 
+/* Intro spray bottle elastic entrance & animated spray pump */
+@keyframes sprayBottlePopIn {
+  0% {
+    opacity: 0;
+    transform: scale(0.35) translateY(36px) rotate(-10deg);
+  }
+  60% {
+    opacity: 1;
+    transform: scale(1.08) translateY(-6px) rotate(4deg);
+  }
+  82% {
+    transform: scale(0.97) translateY(2px) rotate(-2deg);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1) translateY(0px) rotate(0deg);
+  }
+}
+
+@keyframes sprayBottlePump {
+  0% {
+    transform: scale(1) rotate(0deg);
+  }
+  20% {
+    transform: scale(1.06, 0.94) translateY(4px) rotate(-5deg);
+  }
+  45% {
+    transform: scale(0.98, 1.03) translateY(-4px) rotate(3deg);
+  }
+  70% {
+    transform: scale(1.05, 0.95) translateY(3px) rotate(-4deg);
+  }
+  100% {
+    transform: scale(1) rotate(0deg);
+  }
+}
+
+.spray-bottle-pop {
+  animation: sprayBottlePopIn 460ms cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+}
+
+.spray-bottle-pump {
+  animation: sprayBottlePump 580ms cubic-bezier(0.16, 1, 0.3, 1) infinite;
+}
+
 /* Precision range sliders (Warm Western Amber) */
 input[type="range"].studio-slider {
   -webkit-appearance: none;

@@ -8,9 +8,11 @@ import {
   ImagePlus,
   Move,
   Plus,
+  Redo2,
   Share2,
   Sparkles,
   Trash2,
+  Undo2,
   Upload,
   X,
 } from 'lucide-react';
@@ -62,6 +64,10 @@ interface FramingStageProps {
   onLoadSample: (sample: SampleAsset) => void;
   onLoadAllSamples: () => void;
   onUpdateFraming: (patch: Partial<FramingState>) => void;
+  canUndo: boolean;
+  canRedo: boolean;
+  onUndo: () => void;
+  onRedo: () => void;
   onClearAll: () => void;
   onDownloadSingle: () => void;
   onShareOutput: () => Promise<void>;
@@ -144,6 +150,10 @@ export function FramingStage({
   onLoadSample,
   onLoadAllSamples,
   onUpdateFraming,
+  canUndo,
+  canRedo,
+  onUndo,
+  onRedo,
   onClearAll,
   onDownloadSingle,
   onShareOutput,
@@ -941,7 +951,7 @@ export function FramingStage({
             <div className="mt-7 sm:mt-8">
               <div className="mb-3 flex items-baseline justify-between gap-2">
                 <h2 className="text-xs font-semibold text-[#4A3628]">
-                  Or test with sample WebP product photos
+                  Or test with Cockroach Family sample pictures
                 </h2>
                 <button
                   type="button"
@@ -1067,6 +1077,33 @@ export function FramingStage({
             </div>
 
             <div className="flex flex-wrap items-center gap-1.5 sm:gap-2">
+              <div
+                role="group"
+                aria-label="Edit history"
+                className="inline-flex items-center overflow-hidden rounded-lg border border-[#E4D7C3] bg-[#FFFDF8]"
+              >
+                <button
+                  type="button"
+                  disabled={!canUndo}
+                  onClick={onUndo}
+                  aria-label="Undo edit"
+                  title="Undo (Ctrl/Cmd+Z)"
+                  className="inline-flex min-h-[40px] min-w-[40px] items-center justify-center border-r border-[#E4D7C3] px-2 text-[#4A3628] transition-colors hover:bg-[#FAF6EE] hover:text-[#2B1E16] disabled:cursor-not-allowed disabled:opacity-40 sm:min-h-[30px] sm:min-w-[32px]"
+                >
+                  <Undo2 className="h-3.5 w-3.5" aria-hidden="true" />
+                </button>
+                <button
+                  type="button"
+                  disabled={!canRedo}
+                  onClick={onRedo}
+                  aria-label="Redo edit"
+                  title="Redo (Ctrl/Cmd+Shift+Z)"
+                  className="inline-flex min-h-[40px] min-w-[40px] items-center justify-center px-2 text-[#4A3628] transition-colors hover:bg-[#FAF6EE] hover:text-[#2B1E16] disabled:cursor-not-allowed disabled:opacity-40 sm:min-h-[30px] sm:min-w-[32px]"
+                >
+                  <Redo2 className="h-3.5 w-3.5" aria-hidden="true" />
+                </button>
+              </div>
+
               <button
                 type="button"
                 onClick={onToggleBullets}

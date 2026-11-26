@@ -4,11 +4,13 @@ import { BouncyBulletStage } from './components/BouncyBulletStage';
 import { ControlRail } from './components/ControlRail';
 import { FloatingLayerPreview } from './components/FloatingLayerPreview';
 import { FramingStage } from './components/FramingStage';
+import { IntroSplashCurtain } from './components/IntroSplashCurtain';
 import { MobileBottomTabs } from './components/MobileBottomTabs';
 import { OfflineIndicator } from './components/OfflineIndicator';
 import { PlatformPreview } from './components/PlatformPreview';
 import { RatioGuideView } from './components/RatioGuideView';
 import { TopBar } from './components/TopBar';
+import { EditChannel, EditSnapshot, useEditHistory } from './hooks/useEditHistory';
 import {
   DEFAULT_FRAMING,
   DEFAULT_PREVIEW_COPY,
@@ -175,6 +177,7 @@ export default function App() {
   const [shotSeq, setShotSeq] = useState(0);
   const [burstSignal, setBurstSignal] = useState(0);
   const [bulletsEnabled, setBulletsEnabled] = useState(true);
+  const [introVisible, setIntroVisible] = useState(true);
   const [isStageCanvasVisible, setIsStageCanvasVisible] = useState(true);
 
   const muzzleRef = useRef<HTMLSpanElement | null>(null);
@@ -182,11 +185,17 @@ export default function App() {
   const encodeTokenRef = useRef(0);
   const queueRef = useRef<BatchItem[]>([]);
   const logoAssetRef = useRef<LogoWatermarkAsset | null>(null);
+  const allLogoAssetsRef = useRef<Set<LogoWatermarkAsset>>(new Set());
+  const framingRef = useRef<FramingState>(DEFAULT_FRAMING);
+  const activeItemRef = useRef<BatchItem | null>(null);
   const outputUrlRef = useRef<string | null>(null);
   const toastTimeoutRef = useRef<number | null>(null);
 
+  const editHistory = useEditHistory();
+
   queueRef.current = queue;
   logoAssetRef.current = logoAsset;
+  framingRef.current = framing;
 
   const handleMascotShot = useCallback(() => {
     setShotSeq((s) => s + 1);
@@ -218,6 +227,7 @@ export default function App() {
   }, [queue, activeItemId]);
 
   const activeSource = activeItem?.asset ?? null;
+  activeItemRef.current = activeItem;
 
   const autoFitMatch = useMemo(() => {
     if (!activeSource) return null;
@@ -239,6 +249,75 @@ export default function App() {
     [framing, activeItem?.offsetX, activeItem?.offsetY, activeItem?.zoom]
   );
 
+  const getCurrentSnapshot = useCallback((): EditSnapshot => {
+    const curFraming = framingRef.current;
+    const curItem = activeItemRef.current;
+    return {
+      activeItemId: curItem?.id ?? null,
+      offsetX: curItem?.offsetX ?? 0,
+      offsetY: curItem?.offsetY ?? 0,
+      zoom: curItem?.zoom ?? 1,
+      fitMode: curFraming.fitMode,
+      autoCropEnabled: curFraming.autoCropEnabled,
+      padBackdrop: curFraming.padBackdrop,
+      padColor: curFraming.padColor,
+      blurRadius: curFraming.blurRadius,
+      padInset: curFraming.padInset,
+      showGrid: curFraming.showGrid,
+      logoWatermark: {
+        ...curFraming.logoWatermark,
+        bgRemoval: { ...curFraming.logoWatermark.bgRemoval },
+      },
+      logoAsset: logoAssetRef.current,
+    };
+  }, []);
+
+  const applySnapshot = useCallback((snap: EditSnapshot) => {
+    setFraming((prev) => ({
+      ...prev,
+      fitMode: snap.fitMode,
+      autoCropEnabled: snap.autoCropEnabled,
+      padBackdrop: snap.padBackdrop,
+      padColor: snap.padColor,
+      blurRadius: snap.blurRadius,
+      padInset: snap.padInset,
+      showGrid: snap.showGrid,
+      logoWatermark: {
+        ...snap.logoWatermark,
+        bgRemoval: { ...snap.logoWatermark.bgRemoval },
+      },
+    }));
+    logoAssetRef.current = snap.logoAsset;
+    setLogoAsset(snap.logoAsset);
+    if (snap.activeItemId) {
+      setQueue((prev) =>
+        prev.map((item) =>
+          item.id === snap.activeItemId
+            ? {
+                ...item,
+                offsetX: snap.offsetX,
+                offsetY: snap.offsetY,
+                zoom: snap.zoom,
+              }
+            : item
+        )
+      );
+      if (queueRef.current.some((i) => i.id === snap.activeItemId)) {
+        setActiveItemId(snap.activeItemId);
+      }
+    }
+  }, []);
+
+  const pruneUnreferencedLogos = useCallback(() => {
+    const refs = editHistory.getReferencedLogos();
+    for (const asset of allLogoAssetsRef.current) {
+      if (asset !== logoAssetRef.current && !refs.has(asset)) {
+        releaseLogoAsset(asset);
+        allLogoAssetsRef.current.delete(asset);
+      }
+    }
+  }, [editHistory]);
+
   const showToast = useCallback((msg: string) => {
     setToastMessage(msg);
     if (toastTimeoutRef.current !== null) {
@@ -255,7 +334,13 @@ export default function App() {
       for (const item of queueRef.current) {
         URL.revokeObjectURL(item.asset.objectUrl);
       }
-      releaseLogoAsset(logoAssetRef.current);
+      for (const logo of allLogoAssetsRef.current) {
+        releaseLogoAsset(logo);
+      }
+      allLogoAssetsRef.current.clear();
+      if (logoAssetRef.current) {
+        releaseLogoAsset(logoAssetRef.current);
+      }
       if (outputUrlRef.current) URL.revokeObjectURL(outputUrlRef.current);
       if (toastTimeoutRef.current !== null) window.clearTimeout(toastTimeoutRef.current);
     };
@@ -306,6 +391,11 @@ export default function App() {
         }
         return [...prev, ...newItems];
       });
+
+      if (mode === 'replace') {
+        editHistory.clearHistory();
+        pruneUnreferencedLogos();
+      }
 
       setActiveItemId(newItems[0].id);
       setActiveView('converter');
@@ -370,9 +460,11 @@ export default function App() {
         setActiveItemId(item.id);
         setActivePresetId(sample.defaultPresetId);
         setPreviewCopy(sample.defaultCopy);
+        editHistory.clearHistory();
+        pruneUnreferencedLogos();
         setFraming((prev) => ({
           ...prev,
-          fitMode: sample.id === 'sample-serum' ? 'pad' : 'crop',
+          fitMode: sample.id === 'sample-desert-picnic' ? 'pad' : 'crop',
           padBackdrop: 'blur',
           offsetX: 0,
           offsetY: 0,
@@ -387,7 +479,7 @@ export default function App() {
         setIsLoadingSampleId(null);
       }
     },
-    []
+    [editHistory, pruneUnreferencedLogos]
   );
 
   const handleLoadAllSamples = useCallback(async () => {
@@ -405,6 +497,8 @@ export default function App() {
       setActiveItemId(newItems[0].id);
       setActivePresetId(LINE_PRESETS[0].id);
       setPreviewCopy(SAMPLE_ASSETS[0].defaultCopy);
+      editHistory.clearHistory();
+      pruneUnreferencedLogos();
       setFraming((prev) => ({
         ...prev,
         fitMode: 'crop',
@@ -421,7 +515,7 @@ export default function App() {
     } finally {
       setIsLoadingSampleId(null);
     }
-  }, [showToast]);
+  }, [showToast, editHistory, pruneUnreferencedLogos]);
 
   const handleRemoveBatchItem = useCallback(
     (itemId: string) => {
@@ -448,35 +542,46 @@ export default function App() {
       return [];
     });
     setActiveItemId(null);
+    editHistory.clearHistory();
+    pruneUnreferencedLogos();
     if (outputUrlRef.current) {
       URL.revokeObjectURL(outputUrlRef.current);
       outputUrlRef.current = null;
     }
     setOutput(EMPTY_OUTPUT);
     setErrorMessage(null);
-  }, []);
+  }, [editHistory, pruneUnreferencedLogos]);
 
   const handleSelectLogoFile = useCallback(
     async (file: File) => {
       setErrorMessage(null);
       try {
         const loaded = await loadWatermarkLogoFile(file);
-        setLogoAsset((prev) => {
-          releaseLogoAsset(prev);
-          return loaded;
-        });
+        allLogoAssetsRef.current.add(loaded);
+        const before = getCurrentSnapshot();
+        const nextLogoWatermark = {
+          ...before.logoWatermark,
+          enabled: true,
+          gifMotion: loaded.isAnimatedGif
+            ? ('gif-frames' as const)
+            : before.logoWatermark.gifMotion === 'gif-frames'
+            ? ('pulse' as const)
+            : before.logoWatermark.gifMotion,
+        };
+        const after: EditSnapshot = {
+          ...before,
+          logoAsset: loaded,
+          logoWatermark: nextLogoWatermark,
+        };
+        editHistory.recordEdit(before, after, 'discrete');
+
+        logoAssetRef.current = loaded;
+        setLogoAsset(loaded);
         setFraming((prev) => ({
           ...prev,
-          logoWatermark: {
-            ...prev.logoWatermark,
-            enabled: true,
-            gifMotion: loaded.isAnimatedGif
-              ? 'gif-frames'
-              : prev.logoWatermark.gifMotion === 'gif-frames'
-              ? 'pulse'
-              : prev.logoWatermark.gifMotion,
-          },
+          logoWatermark: nextLogoWatermark,
         }));
+        pruneUnreferencedLogos();
         showToast(
           loaded.isAnimatedGif
             ? `Loaded ${loaded.gifFrames?.length ?? 0}-frame animated GIF watermark`
@@ -488,22 +593,30 @@ export default function App() {
         );
       }
     },
-    [showToast]
+    [showToast, getCurrentSnapshot, editHistory, pruneUnreferencedLogos]
   );
 
   const handleClearLogo = useCallback(() => {
-    setLogoAsset((prev) => {
-      releaseLogoAsset(prev);
-      return null;
-    });
+    const before = getCurrentSnapshot();
+    const nextLogoWatermark = {
+      ...before.logoWatermark,
+      enabled: false,
+    };
+    const after: EditSnapshot = {
+      ...before,
+      logoAsset: null,
+      logoWatermark: nextLogoWatermark,
+    };
+    editHistory.recordEdit(before, after, 'discrete');
+
+    logoAssetRef.current = null;
+    setLogoAsset(null);
     setFraming((prev) => ({
       ...prev,
-      logoWatermark: {
-        ...prev.logoWatermark,
-        enabled: false,
-      },
+      logoWatermark: nextLogoWatermark,
     }));
-  }, []);
+    pruneUnreferencedLogos();
+  }, [getCurrentSnapshot, editHistory, pruneUnreferencedLogos]);
 
   const handleUseMascotLogo = useCallback(async () => {
     setErrorMessage(null);
@@ -517,28 +630,37 @@ export default function App() {
         type: 'image/svg+xml',
       });
       const loaded = await loadWatermarkLogoFile(mascotFile);
-      setLogoAsset((prev) => {
-        releaseLogoAsset(prev);
-        return loaded;
-      });
+      allLogoAssetsRef.current.add(loaded);
+      const before = getCurrentSnapshot();
+      const nextLogoWatermark = {
+        ...before.logoWatermark,
+        enabled: true,
+        gifMotion:
+          before.logoWatermark.gifMotion === 'gif-frames'
+            ? ('pulse' as const)
+            : before.logoWatermark.gifMotion,
+      };
+      const after: EditSnapshot = {
+        ...before,
+        logoAsset: loaded,
+        logoWatermark: nextLogoWatermark,
+      };
+      editHistory.recordEdit(before, after, 'discrete');
+
+      logoAssetRef.current = loaded;
+      setLogoAsset(loaded);
       setFraming((prev) => ({
         ...prev,
-        logoWatermark: {
-          ...prev.logoWatermark,
-          enabled: true,
-          gifMotion:
-            prev.logoWatermark.gifMotion === 'gif-frames'
-              ? 'pulse'
-              : prev.logoWatermark.gifMotion,
-        },
+        logoWatermark: nextLogoWatermark,
       }));
+      pruneUnreferencedLogos();
       showToast('Cowboy Roach watermark logo ready');
     } catch (err) {
       setErrorMessage(
         err instanceof Error ? err.message : 'Failed to load mascot watermark.'
       );
     }
-  }, [showToast]);
+  }, [showToast, getCurrentSnapshot, editHistory, pruneUnreferencedLogos]);
 
   const handleExportLogoGif = useCallback(async () => {
     if (!logoAsset || isExportingLogoGif) return;
@@ -569,12 +691,41 @@ export default function App() {
 
   const handleUpdateFraming = useCallback(
     (patch: Partial<FramingState>) => {
+      const before = getCurrentSnapshot();
       const { offsetX, offsetY, zoom, ...sharedPatch } = patch;
+      const touchesHistory =
+        offsetX !== undefined ||
+        offsetY !== undefined ||
+        zoom !== undefined ||
+        patch.fitMode !== undefined ||
+        patch.autoCropEnabled !== undefined ||
+        patch.padBackdrop !== undefined ||
+        patch.padColor !== undefined ||
+        patch.blurRadius !== undefined ||
+        patch.padInset !== undefined ||
+        patch.showGrid !== undefined ||
+        patch.logoWatermark !== undefined;
+
+      let nextOffsetX = offsetX ?? before.offsetX;
+      let nextOffsetY = offsetY ?? before.offsetY;
+      let nextZoom = zoom ?? before.zoom;
+
       if (Object.keys(sharedPatch).length > 0) {
         setFraming((prev) => ({ ...prev, ...sharedPatch }));
         if (sharedPatch.autoCropEnabled !== undefined) {
           const nextAutoCrop = sharedPatch.autoCropEnabled;
-          setQueue((prev) => recenterQueueToPreset(prev, activePreset, nextAutoCrop));
+          const nextQueue = recenterQueueToPreset(
+            queueRef.current,
+            activePreset,
+            nextAutoCrop
+          );
+          setQueue(nextQueue);
+          const updatedActive = nextQueue.find((i) => i.id === before.activeItemId);
+          if (updatedActive) {
+            nextOffsetX = updatedActive.offsetX;
+            nextOffsetY = updatedActive.offsetY;
+            nextZoom = updatedActive.zoom;
+          }
         }
       }
       if (
@@ -587,53 +738,145 @@ export default function App() {
             item.id === targetId
               ? {
                   ...item,
-                  offsetX: offsetX ?? item.offsetX,
-                  offsetY: offsetY ?? item.offsetY,
-                  zoom: zoom ?? item.zoom,
+                  offsetX: nextOffsetX,
+                  offsetY: nextOffsetY,
+                  zoom: nextZoom,
                 }
               : item
           )
         );
       }
+
+      if (touchesHistory) {
+        const nextLogoWatermark = patch.logoWatermark
+          ? {
+              ...patch.logoWatermark,
+              bgRemoval: { ...patch.logoWatermark.bgRemoval },
+            }
+          : before.logoWatermark;
+
+        const after: EditSnapshot = {
+          activeItemId: before.activeItemId,
+          offsetX: nextOffsetX,
+          offsetY: nextOffsetY,
+          zoom: nextZoom,
+          fitMode: patch.fitMode ?? before.fitMode,
+          autoCropEnabled: patch.autoCropEnabled ?? before.autoCropEnabled,
+          padBackdrop: patch.padBackdrop ?? before.padBackdrop,
+          padColor: patch.padColor ?? before.padColor,
+          blurRadius: patch.blurRadius ?? before.blurRadius,
+          padInset: patch.padInset ?? before.padInset,
+          showGrid: patch.showGrid ?? before.showGrid,
+          logoWatermark: nextLogoWatermark,
+          logoAsset: before.logoAsset,
+        };
+
+        let channel: EditChannel = 'discrete';
+        const isContinuousFraming =
+          (offsetX !== undefined ||
+            offsetY !== undefined ||
+            zoom !== undefined ||
+            patch.blurRadius !== undefined ||
+            patch.padInset !== undefined) &&
+          patch.fitMode === undefined &&
+          patch.autoCropEnabled === undefined &&
+          patch.padBackdrop === undefined &&
+          patch.showGrid === undefined &&
+          patch.logoWatermark === undefined;
+
+        if (isContinuousFraming) {
+          channel = 'framing';
+        } else if (
+          patch.logoWatermark !== undefined &&
+          offsetX === undefined &&
+          offsetY === undefined &&
+          zoom === undefined &&
+          patch.fitMode === undefined &&
+          patch.autoCropEnabled === undefined &&
+          patch.padBackdrop === undefined &&
+          patch.showGrid === undefined
+        ) {
+          const prevLw = before.logoWatermark;
+          const nextLw = patch.logoWatermark;
+          const discreteLogoChanged =
+            prevLw.enabled !== nextLw.enabled ||
+            prevLw.position !== nextLw.position ||
+            prevLw.gifMotion !== nextLw.gifMotion ||
+            prevLw.gifSpeed !== nextLw.gifSpeed ||
+            prevLw.gifFps !== nextLw.gifFps ||
+            prevLw.bgRemoval.enabled !== nextLw.bgRemoval.enabled ||
+            prevLw.bgRemoval.mode !== nextLw.bgRemoval.mode ||
+            prevLw.bgRemoval.removeInteriorHoles !== nextLw.bgRemoval.removeInteriorHoles ||
+            prevLw.bgRemoval.defringe !== nextLw.bgRemoval.defringe ||
+            prevLw.bgRemoval.targetColor !== nextLw.bgRemoval.targetColor;
+          if (!discreteLogoChanged) {
+            channel = 'logo';
+          }
+        }
+
+        editHistory.recordEdit(before, after, channel);
+        pruneUnreferencedLogos();
+      }
     },
-    [activeItem, activePreset]
+    [activeItem, activePreset, getCurrentSnapshot, editHistory, pruneUnreferencedLogos]
   );
 
   const handleResetFraming = useCallback(() => {
+    const before = getCurrentSnapshot();
+    let nextOffsetX = 0;
+    let nextOffsetY = 0;
+
     setFraming((prev) => ({
       ...prev,
       padInset: 4,
       blurRadius: 24,
       autoCropEnabled: true,
     }));
+
     if (activeItem) {
       const targetId = activeItem.id;
+      if (activeItem.asset.autoCrop) {
+        const { effectiveWidth, effectiveHeight } = getEffectiveSourceRect(
+          activeItem.asset,
+          { autoCropEnabled: true }
+        );
+        const centered = computeCenteredOffsetsForPreset(
+          effectiveWidth,
+          effectiveHeight,
+          activePreset.width,
+          activePreset.height,
+          activeItem.asset.autoCrop.subjectCenter,
+          1,
+          activeItem.asset.autoCrop.targetAnchor
+        );
+        nextOffsetX = centered.offsetX;
+        nextOffsetY = centered.offsetY;
+      }
+
       setQueue((prev) =>
-        prev.map((item) => {
-          if (item.id !== targetId) return item;
-          if (!item.asset.autoCrop) {
-            return { ...item, offsetX: 0, offsetY: 0, zoom: 1 };
-          }
-          const { effectiveWidth, effectiveHeight } = getEffectiveSourceRect(item.asset, {
-            autoCropEnabled: true,
-          });
-          const { offsetX, offsetY } = computeCenteredOffsetsForPreset(
-            effectiveWidth,
-            effectiveHeight,
-            activePreset.width,
-            activePreset.height,
-            item.asset.autoCrop.subjectCenter,
-            1,
-            item.asset.autoCrop.targetAnchor
-          );
-          return { ...item, offsetX, offsetY, zoom: 1 };
-        })
+        prev.map((item) =>
+          item.id === targetId
+            ? { ...item, offsetX: nextOffsetX, offsetY: nextOffsetY, zoom: 1 }
+            : item
+        )
       );
     }
-  }, [activeItem, activePreset.width, activePreset.height]);
+
+    const after: EditSnapshot = {
+      ...before,
+      padInset: 4,
+      blurRadius: 24,
+      autoCropEnabled: true,
+      offsetX: activeItem ? nextOffsetX : before.offsetX,
+      offsetY: activeItem ? nextOffsetY : before.offsetY,
+      zoom: activeItem ? 1 : before.zoom,
+    };
+    editHistory.recordEdit(before, after, 'discrete');
+  }, [activeItem, activePreset.width, activePreset.height, getCurrentSnapshot, editHistory]);
 
   const handleReCenterSubject = useCallback(() => {
     if (!activeItem) return;
+    const before = getCurrentSnapshot();
     const { effectiveWidth, effectiveHeight } = getEffectiveSourceRect(
       activeItem.asset,
       { autoCropEnabled: framing.autoCropEnabled }
@@ -654,7 +897,37 @@ export default function App() {
         item.id === activeItem.id ? { ...item, offsetX, offsetY, zoom: 1 } : item
       )
     );
-  }, [activeItem, activePreset.width, activePreset.height, framing.autoCropEnabled]);
+    const after: EditSnapshot = {
+      ...before,
+      offsetX,
+      offsetY,
+      zoom: 1,
+    };
+    editHistory.recordEdit(before, after, 'discrete');
+  }, [
+    activeItem,
+    activePreset.width,
+    activePreset.height,
+    framing.autoCropEnabled,
+    getCurrentSnapshot,
+    editHistory,
+  ]);
+
+  const handleUndo = useCallback(() => {
+    const prev = editHistory.undo(getCurrentSnapshot());
+    if (!prev) return;
+    applySnapshot(prev);
+    pruneUnreferencedLogos();
+    showToast('Undid last edit');
+  }, [editHistory, getCurrentSnapshot, applySnapshot, pruneUnreferencedLogos, showToast]);
+
+  const handleRedo = useCallback(() => {
+    const next = editHistory.redo(getCurrentSnapshot());
+    if (!next) return;
+    applySnapshot(next);
+    pruneUnreferencedLogos();
+    showToast('Redid edit');
+  }, [editHistory, getCurrentSnapshot, applySnapshot, pruneUnreferencedLogos, showToast]);
 
   const handleSelectPreset = useCallback(
     (presetId: string) => {
@@ -966,6 +1239,39 @@ export default function App() {
     };
 
     const onKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      const isTextField =
+        (target instanceof HTMLInputElement &&
+          target.type !== 'range' &&
+          target.type !== 'checkbox' &&
+          target.type !== 'radio') ||
+        target instanceof HTMLTextAreaElement ||
+        target instanceof HTMLSelectElement ||
+        Boolean(target?.isContentEditable);
+
+      if (!isTextField && (e.metaKey || e.ctrlKey) && !e.altKey) {
+        const key = e.key.toLowerCase();
+        if (key === 'z') {
+          if (e.shiftKey) {
+            if (editHistory.canRedo) {
+              e.preventDefault();
+              handleRedo();
+            }
+          } else if (editHistory.canUndo) {
+            e.preventDefault();
+            handleUndo();
+          }
+          return;
+        }
+        if (key === 'y' && e.ctrlKey && !e.metaKey) {
+          if (editHistory.canRedo) {
+            e.preventDefault();
+            handleRedo();
+          }
+          return;
+        }
+      }
+
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's') {
         if (
           queue.length > 0 &&
@@ -987,6 +1293,10 @@ export default function App() {
   }, [
     handleSelectFiles,
     handlePrimaryDownload,
+    handleUndo,
+    handleRedo,
+    editHistory.canUndo,
+    editHistory.canRedo,
     queue.length,
     zipState.exporting,
     output.blob,
@@ -1068,11 +1378,15 @@ export default function App() {
       />
 
       <BouncyBulletStage
-        enabled={bulletsEnabled}
+        enabled={bulletsEnabled && !introVisible}
         muzzleRef={muzzleRef}
         burstSignal={burstSignal}
         onAutoShot={handleMascotShot}
       />
+
+      {introVisible && (
+        <IntroSplashCurtain onComplete={() => setIntroVisible(false)} />
+      )}
 
       <OfflineIndicator />
 
@@ -1155,6 +1469,10 @@ export default function App() {
               onLoadSample={handleLoadSample}
               onLoadAllSamples={handleLoadAllSamples}
               onUpdateFraming={handleUpdateFraming}
+              canUndo={editHistory.canUndo}
+              canRedo={editHistory.canRedo}
+              onUndo={handleUndo}
+              onRedo={handleRedo}
               onClearAll={handleClearAll}
               onDownloadSingle={handleDownloadSingle}
               onShareOutput={handleShareOutput}

@@ -53,8 +53,126 @@ export type MatteMode = 'white' | 'edge' | 'black' | 'custom';
 
 export type ResolutionScale = 1 | 2;
 
+export type BgRemovalMode =
+  | 'auto-edge'
+  | 'gradient-checker'
+  | 'luma-light'
+  | 'luma-dark'
+  | 'chroma-key';
+
+export interface BgRemovalConfig {
+  enabled: boolean;
+  mode: BgRemovalMode;
+  tolerance: number; // 5 to 100
+  smoothness: number; // 0 to 10
+  edgeTrim: number; // 0 to 3 px
+  removeInteriorHoles: boolean;
+  defringe: boolean;
+  targetColor: string;
+}
+
+export type WatermarkAnchor =
+  | 'top-left'
+  | 'top-center'
+  | 'top-right'
+  | 'middle-left'
+  | 'center'
+  | 'middle-right'
+  | 'bottom-left'
+  | 'bottom-center'
+  | 'bottom-right'
+  | 'tile';
+
+export interface LogoWatermarkAsset {
+  image: HTMLImageElement;
+  objectUrl: string;
+  fileName: string;
+  naturalWidth: number;
+  naturalHeight: number;
+  edgeColor: string;
+}
+
+export interface LogoWatermarkState {
+  enabled: boolean;
+  sizePercent: number; // 6 to 65
+  opacity: number; // 0.1 to 1
+  position: WatermarkAnchor;
+  marginPercent: number; // 0 to 15
+  rotation: number; // -45 to 45
+  bgRemoval: BgRemovalConfig;
+}
+
+export type TextFontStyle = 'display' | 'sans' | 'mono' | 'serif';
+
+export interface TextWatermarkState {
+  enabled: boolean;
+  text: string;
+  fontStyle: TextFontStyle;
+  bold: boolean;
+  italic: boolean;
+  sizePercent: number; // 2 to 16
+  color: string;
+  opacity: number; // 0.1 to 1
+  position: WatermarkAnchor;
+  marginPercent: number; // 0 to 15
+  rotation: number; // -45 to 45
+  strokeEnabled: boolean;
+  strokeColor: string;
+  shadowEnabled: boolean;
+  badgeEnabled: boolean;
+  badgeColor: string;
+  badgeOpacity: number; // 0.15 to 1
+}
+
+export interface NormalizedRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export type SubjectDetectionMethod =
+  | 'face-api'
+  | 'portrait-heuristic'
+  | 'focal-contrast'
+  | 'centered';
+
+export type AspectOrientation = 'portrait' | 'square' | 'landscape';
+
+export interface AutoCropAnalysis {
+  trimBounds: NormalizedRect;
+  trimmedPercent: number;
+  subjectCenter: { x: number; y: number }; // 0..1 within trimmedBounds
+  targetAnchor: { x: number; y: number }; // {0.5, 0.38} for portrait headroom, {0.5, 0.5} standard
+  detectionMethod: SubjectDetectionMethod;
+  isPortraitSubject: boolean;
+  faceCount: number;
+  initialOffsetX: number;
+  initialOffsetY: number;
+  hasTrimmedMargins: boolean;
+}
+
+export interface AspectPresetCandidate {
+  preset: LinePreset;
+  platformLabel: string;
+  distance: number;
+  isExactMatch: boolean;
+}
+
+export interface AspectPresetMatch {
+  preset: LinePreset;
+  platformLabel: string;
+  sourceRatioLabel: string;
+  sourceAspectRatio: number;
+  orientation: AspectOrientation;
+  distance: number;
+  isExactMatch: boolean;
+  alternatives: AspectPresetCandidate[];
+}
+
 export interface FramingState {
   fitMode: FitMode;
+  autoCropEnabled: boolean;
   offsetX: number; // -1 to 1 normalized pan offset within available overflow
   offsetY: number; // -1 to 1 normalized pan offset within available overflow
   zoom: number; // 1.0 to 3.0
@@ -75,6 +193,9 @@ export interface FramingState {
   customWidth: number;
   customHeight: number;
   lockCustomAspect: boolean;
+  bgRemoval: BgRemovalConfig;
+  logoWatermark: LogoWatermarkState;
+  textWatermark: TextWatermarkState;
 }
 
 export interface SourceAsset {
@@ -90,6 +211,8 @@ export interface SourceAsset {
   hasTransparency: boolean;
   transparencyPercent: number;
   isSample?: boolean;
+  autoCrop?: AutoCropAnalysis;
+  aspectMatch?: AspectPresetMatch;
 }
 
 export interface EncodedOutput {
@@ -144,4 +267,4 @@ export interface ZipExportState {
 
 export type ActiveView = 'converter' | 'guide' | 'tips';
 
-export type MobileTab = 'presets' | 'fit' | 'quality' | 'preview';
+export type MobileTab = 'presets' | 'fit' | 'layers' | 'quality' | 'preview';

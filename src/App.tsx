@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AlertCircle, CheckCircle2, ChevronDown, ChevronUp, X } from 'lucide-react';
 import { BouncyBulletStage } from './components/BouncyBulletStage';
 import { ControlRail } from './components/ControlRail';
+import { FloatingLayerPreview } from './components/FloatingLayerPreview';
 import { FramingStage } from './components/FramingStage';
 import { MobileBottomTabs } from './components/MobileBottomTabs';
 import { OfflineIndicator } from './components/OfflineIndicator';
@@ -21,6 +22,7 @@ import {
   BatchItem,
   EncodedOutput,
   FramingState,
+  LogoWatermarkAsset,
   MobileTab,
   PlatformId,
   PreviewCopy,
@@ -36,9 +38,15 @@ import {
   getFormatMime,
   loadSampleAsWebP,
   loadSourceFile,
+  loadWatermarkLogoFile,
   recommendOutputFormat,
   resolveMatteColor,
 } from './utils/imageEngine';
+import {
+  computeCenteredOffsetsForPreset,
+  detectClosestPresetMatch,
+  getEffectiveSourceRect,
+} from './utils/autoFraming';
 import { buildBatchZipArchive } from './utils/zipExporter';
 
 const EMPTY_OUTPUT: EncodedOutput = {
@@ -75,11 +83,66 @@ function makeBatchItem(asset: SourceAsset): BatchItem {
   };
 }
 
+function makeCenteredBatchItem(
+  asset: SourceAsset,
+  targetPreset: { width: number; height: number },
+  autoCropEnabled: boolean
+): BatchItem {
+  if (!autoCropEnabled || !asset.autoCrop) {
+    return makeBatchItem(asset);
+  }
+  const { effectiveWidth, effectiveHeight } = getEffectiveSourceRect(asset, {
+    autoCropEnabled,
+  });
+  const { offsetX, offsetY } = computeCenteredOffsetsForPreset(
+    effectiveWidth,
+    effectiveHeight,
+    targetPreset.width,
+    targetPreset.height,
+    asset.autoCrop.subjectCenter,
+    1,
+    asset.autoCrop.targetAnchor
+  );
+  return {
+    id: createBatchId(),
+    asset,
+    offsetX,
+    offsetY,
+    zoom: 1,
+  };
+}
+
+function recenterQueueToPreset(
+  items: BatchItem[],
+  targetPreset: { width: number; height: number },
+  autoCropEnabled: boolean
+): BatchItem[] {
+  return items.map((item) => {
+    if (!autoCropEnabled || !item.asset.autoCrop) {
+      return { ...item, offsetX: 0, offsetY: 0 };
+    }
+    const { effectiveWidth, effectiveHeight } = getEffectiveSourceRect(item.asset, {
+      autoCropEnabled,
+    });
+    const { offsetX, offsetY } = computeCenteredOffsetsForPreset(
+      effectiveWidth,
+      effectiveHeight,
+      targetPreset.width,
+      targetPreset.height,
+      item.asset.autoCrop.subjectCenter,
+      1,
+      item.asset.autoCrop.targetAnchor
+    );
+    return { ...item, offsetX, offsetY, zoom: 1 };
+  });
+}
+
 export default function App() {
   const [activeView, setActiveView] = useState<ActiveView>('converter');
   const [activePresetId, setActivePresetId] = useState<string>(LINE_PRESETS[0].id);
   const [queue, setQueue] = useState<BatchItem[]>([]);
   const [activeItemId, setActiveItemId] = useState<string | null>(null);
+  const [logoAsset, setLogoAsset] = useState<LogoWatermarkAsset | null>(null);
   const [framing, setFraming] = useState<FramingState>(DEFAULT_FRAMING);
   const [output, setOutput] = useState<EncodedOutput>(EMPTY_OUTPUT);
   const [zipState, setZipState] = useState<ZipExportState>(IDLE_ZIP_STATE);
@@ -98,15 +161,18 @@ export default function App() {
   const [shotSeq, setShotSeq] = useState(0);
   const [burstSignal, setBurstSignal] = useState(0);
   const [bulletsEnabled, setBulletsEnabled] = useState(true);
+  const [isStageCanvasVisible, setIsStageCanvasVisible] = useState(true);
 
   const muzzleRef = useRef<HTMLSpanElement | null>(null);
   const dragCounterRef = useRef(0);
   const encodeTokenRef = useRef(0);
   const queueRef = useRef<BatchItem[]>([]);
+  const logoAssetRef = useRef<LogoWatermarkAsset | null>(null);
   const outputUrlRef = useRef<string | null>(null);
   const toastTimeoutRef = useRef<number | null>(null);
 
   queueRef.current = queue;
+  logoAssetRef.current = logoAsset;
 
   const handleMascotShot = useCallback(() => {
     setShotSeq((s) => s + 1);
@@ -139,6 +205,16 @@ export default function App() {
 
   const activeSource = activeItem?.asset ?? null;
 
+  const autoFitMatch = useMemo(() => {
+    if (!activeSource) return null;
+    const { effectiveWidth, effectiveHeight } = getEffectiveSourceRect(activeSource, {
+      autoCropEnabled: framing.autoCropEnabled,
+    });
+    return detectClosestPresetMatch(effectiveWidth, effectiveHeight, {
+      isPortraitSubject: activeSource.autoCrop?.isPortraitSubject,
+    });
+  }, [activeSource, framing.autoCropEnabled]);
+
   const effectiveFraming: FramingState = useMemo(
     () => ({
       ...framing,
@@ -165,6 +241,7 @@ export default function App() {
       for (const item of queueRef.current) {
         URL.revokeObjectURL(item.asset.objectUrl);
       }
+      if (logoAssetRef.current) URL.revokeObjectURL(logoAssetRef.current.objectUrl);
       if (outputUrlRef.current) URL.revokeObjectURL(outputUrlRef.current);
       if (toastTimeoutRef.current !== null) window.clearTimeout(toastTimeoutRef.current);
     };
@@ -202,7 +279,9 @@ export default function App() {
         );
       }
 
-      const newItems = loadedAssets.map(makeBatchItem);
+      const newItems = loadedAssets.map((asset) =>
+        makeCenteredBatchItem(asset, activePreset, framing.autoCropEnabled)
+      );
 
       setQueue((prev) => {
         if (mode === 'replace') {
@@ -234,8 +313,12 @@ export default function App() {
               ? 'white'
               : prev.padBackdrop,
         }));
+        const trimNote =
+          primaryAsset.autoCrop?.hasTrimmedMargins && framing.autoCropEnabled
+            ? ` · Trimmed ${primaryAsset.autoCrop.trimmedPercent}% border`
+            : '';
         showToast(
-          `Auto-selected ${getFormatLabel(rec.format)} (${anyTransparent ? 'transparency preserved' : 'optimized for photos'})`
+          `Auto-selected ${getFormatLabel(rec.format)} (${anyTransparent ? 'transparency preserved' : 'optimized for photos'})${trimNote}`
         );
       } else if (newItems.length > 1) {
         showToast(
@@ -248,9 +331,13 @@ export default function App() {
         showToast(
           `Transparency detected — ${matte} matte auto-applied for JPEG`
         );
+      } else if (primaryAsset.autoCrop?.hasTrimmedMargins && framing.autoCropEnabled) {
+        showToast(
+          `Auto-cropped ${primaryAsset.autoCrop.trimmedPercent}% blank margin & centered subject`
+        );
       }
     },
-    [framing, showToast]
+    [framing, activePreset, showToast]
   );
 
   const handleLoadSample = useCallback(
@@ -355,11 +442,86 @@ export default function App() {
     setErrorMessage(null);
   }, []);
 
+  const handleSelectLogoFile = useCallback(
+    async (file: File) => {
+      setErrorMessage(null);
+      try {
+        const loaded = await loadWatermarkLogoFile(file);
+        setLogoAsset((prev) => {
+          if (prev) URL.revokeObjectURL(prev.objectUrl);
+          return loaded;
+        });
+        setFraming((prev) => ({
+          ...prev,
+          logoWatermark: {
+            ...prev.logoWatermark,
+            enabled: true,
+          },
+        }));
+        showToast(`Loaded watermark logo: ${loaded.fileName}`);
+      } catch (err) {
+        setErrorMessage(
+          err instanceof Error ? err.message : 'Unable to load watermark logo image.'
+        );
+      }
+    },
+    [showToast]
+  );
+
+  const handleClearLogo = useCallback(() => {
+    setLogoAsset((prev) => {
+      if (prev) URL.revokeObjectURL(prev.objectUrl);
+      return null;
+    });
+    setFraming((prev) => ({
+      ...prev,
+      logoWatermark: {
+        ...prev.logoWatermark,
+        enabled: false,
+      },
+    }));
+  }, []);
+
+  const handleUseMascotLogo = useCallback(async () => {
+    setErrorMessage(null);
+    try {
+      const response = await fetch('/icon.svg');
+      if (!response.ok) {
+        throw new Error('Could not load mascot logo asset.');
+      }
+      const svgText = await response.text();
+      const mascotFile = new File([svgText], 'cowboy-roach-logo.svg', {
+        type: 'image/svg+xml',
+      });
+      const loaded = await loadWatermarkLogoFile(mascotFile);
+      setLogoAsset((prev) => {
+        if (prev) URL.revokeObjectURL(prev.objectUrl);
+        return loaded;
+      });
+      setFraming((prev) => ({
+        ...prev,
+        logoWatermark: {
+          ...prev.logoWatermark,
+          enabled: true,
+        },
+      }));
+      showToast('Cowboy Roach watermark logo ready');
+    } catch (err) {
+      setErrorMessage(
+        err instanceof Error ? err.message : 'Failed to load mascot watermark.'
+      );
+    }
+  }, [showToast]);
+
   const handleUpdateFraming = useCallback(
     (patch: Partial<FramingState>) => {
       const { offsetX, offsetY, zoom, ...sharedPatch } = patch;
       if (Object.keys(sharedPatch).length > 0) {
         setFraming((prev) => ({ ...prev, ...sharedPatch }));
+        if (sharedPatch.autoCropEnabled !== undefined) {
+          const nextAutoCrop = sharedPatch.autoCropEnabled;
+          setQueue((prev) => recenterQueueToPreset(prev, activePreset, nextAutoCrop));
+        }
       }
       if (
         (offsetX !== undefined || offsetY !== undefined || zoom !== undefined) &&
@@ -380,7 +542,7 @@ export default function App() {
         );
       }
     },
-    [activeItem]
+    [activeItem, activePreset]
   );
 
   const handleResetFraming = useCallback(() => {
@@ -388,34 +550,110 @@ export default function App() {
       ...prev,
       padInset: 4,
       blurRadius: 24,
+      autoCropEnabled: true,
     }));
     if (activeItem) {
       const targetId = activeItem.id;
       setQueue((prev) =>
-        prev.map((item) =>
-          item.id === targetId ? { ...item, offsetX: 0, offsetY: 0, zoom: 1 } : item
-        )
+        prev.map((item) => {
+          if (item.id !== targetId) return item;
+          if (!item.asset.autoCrop) {
+            return { ...item, offsetX: 0, offsetY: 0, zoom: 1 };
+          }
+          const { effectiveWidth, effectiveHeight } = getEffectiveSourceRect(item.asset, {
+            autoCropEnabled: true,
+          });
+          const { offsetX, offsetY } = computeCenteredOffsetsForPreset(
+            effectiveWidth,
+            effectiveHeight,
+            activePreset.width,
+            activePreset.height,
+            item.asset.autoCrop.subjectCenter,
+            1,
+            item.asset.autoCrop.targetAnchor
+          );
+          return { ...item, offsetX, offsetY, zoom: 1 };
+        })
       );
     }
-  }, [activeItem]);
+  }, [activeItem, activePreset.width, activePreset.height]);
 
-  const handleSelectPreset = useCallback((presetId: string) => {
-    setActivePresetId(presetId);
-    setQueue((prev) => prev.map((item) => ({ ...item, offsetX: 0, offsetY: 0 })));
-  }, []);
+  const handleReCenterSubject = useCallback(() => {
+    if (!activeItem) return;
+    const { effectiveWidth, effectiveHeight } = getEffectiveSourceRect(
+      activeItem.asset,
+      { autoCropEnabled: framing.autoCropEnabled }
+    );
+    const center = activeItem.asset.autoCrop?.subjectCenter ?? { x: 0.5, y: 0.5 };
+    const targetAnchor = activeItem.asset.autoCrop?.targetAnchor ?? { x: 0.5, y: 0.5 };
+    const { offsetX, offsetY } = computeCenteredOffsetsForPreset(
+      effectiveWidth,
+      effectiveHeight,
+      activePreset.width,
+      activePreset.height,
+      center,
+      1,
+      targetAnchor
+    );
+    setQueue((prev) =>
+      prev.map((item) =>
+        item.id === activeItem.id ? { ...item, offsetX, offsetY, zoom: 1 } : item
+      )
+    );
+  }, [activeItem, activePreset.width, activePreset.height, framing.autoCropEnabled]);
 
-  const handleSelectPlatform = useCallback((platform: PlatformId) => {
-    const category = PLATFORM_CATEGORIES.find((c) => c.id === platform);
-    if (!category) return;
-    setActivePresetId(category.defaultPresetId);
-    setQueue((prev) => prev.map((item) => ({ ...item, offsetX: 0, offsetY: 0 })));
-  }, []);
+  const handleSelectPreset = useCallback(
+    (presetId: string) => {
+      setActivePresetId(presetId);
+      const nextRaw = LINE_PRESETS.find((p) => p.id === presetId) ?? LINE_PRESETS[0];
+      const nextResolved = resolveActivePreset(nextRaw, framing);
+      setQueue((prev) =>
+        recenterQueueToPreset(prev, nextResolved, framing.autoCropEnabled)
+      );
+    },
+    [framing]
+  );
 
-  const handleApplyPresetFromGuide = useCallback((presetId: string) => {
-    setActivePresetId(presetId);
-    setQueue((prev) => prev.map((item) => ({ ...item, offsetX: 0, offsetY: 0 })));
+  const handleSelectPlatform = useCallback(
+    (platform: PlatformId) => {
+      const category = PLATFORM_CATEGORIES.find((c) => c.id === platform);
+      if (!category) return;
+      setActivePresetId(category.defaultPresetId);
+      const nextRaw =
+        LINE_PRESETS.find((p) => p.id === category.defaultPresetId) ?? LINE_PRESETS[0];
+      const nextResolved = resolveActivePreset(nextRaw, framing);
+      setQueue((prev) =>
+        recenterQueueToPreset(prev, nextResolved, framing.autoCropEnabled)
+      );
+    },
+    [framing]
+  );
+
+  const handleApplyPresetFromGuide = useCallback(
+    (presetId: string) => {
+      setActivePresetId(presetId);
+      const nextRaw = LINE_PRESETS.find((p) => p.id === presetId) ?? LINE_PRESETS[0];
+      const nextResolved = resolveActivePreset(nextRaw, framing);
+      setQueue((prev) =>
+        recenterQueueToPreset(prev, nextResolved, framing.autoCropEnabled)
+      );
+      setActiveView('converter');
+    },
+    [framing]
+  );
+
+  const handleApplyAutoFit = useCallback(() => {
+    if (!autoFitMatch) return;
+    const nextResolved = resolveActivePreset(autoFitMatch.preset, framing);
+    setActivePresetId(autoFitMatch.preset.id);
+    setQueue((prev) =>
+      recenterQueueToPreset(prev, nextResolved, framing.autoCropEnabled)
+    );
     setActiveView('converter');
-  }, []);
+    showToast(
+      `Auto-Fit applied: ${autoFitMatch.platformLabel} ${autoFitMatch.preset.shortName} (${autoFitMatch.preset.ratioLabel})`
+    );
+  }, [autoFitMatch, framing, showToast]);
 
   const handleSelectMobileTab = useCallback(
     (tab: MobileTab) => {
@@ -448,7 +686,8 @@ export default function App() {
         const result = await encodeImageOutput(
           activeSource,
           activePreset,
-          effectiveFraming
+          effectiveFraming,
+          logoAsset
         );
         if (token !== encodeTokenRef.current) return;
 
@@ -484,7 +723,7 @@ export default function App() {
     return () => {
       window.clearTimeout(timer);
     };
-  }, [activeSource, activePreset, effectiveFraming]);
+  }, [activeSource, activePreset, effectiveFraming, logoAsset]);
 
   const handleDownloadSingle = useCallback(() => {
     if (!activeSource || !output.blob) return;
@@ -517,7 +756,8 @@ export default function App() {
         (completed, total) => {
           setZipState({ exporting: true, completed, total });
         },
-        batchPrefix
+        batchPrefix,
+        logoAsset
       );
 
       const url = URL.createObjectURL(result.blob);
@@ -541,7 +781,7 @@ export default function App() {
     } finally {
       setZipState(IDLE_ZIP_STATE);
     }
-  }, [queue, activePreset, framing, zipState.exporting, batchPrefix, showToast]);
+  }, [queue, activePreset, framing, zipState.exporting, batchPrefix, logoAsset, showToast]);
 
   const handlePrimaryDownload = useCallback(() => {
     if (queue.length > 1) {
@@ -563,7 +803,8 @@ export default function App() {
           activePreset,
           framing,
           undefined,
-          batchPrefix
+          batchPrefix,
+          logoAsset
         );
         shareFile = new File([result.blob], result.archiveName, {
           type: 'application/zip',
@@ -610,6 +851,7 @@ export default function App() {
     activePreset,
     framing,
     batchPrefix,
+    logoAsset,
     activeSource,
     output.blob,
     handlePrimaryDownload,
@@ -747,6 +989,7 @@ export default function App() {
         ? 'LINE Template Ratio'
         : `${platformShortLabel} Size Presets`,
     fit: 'Framing & Fit',
+    layers: 'BG, Logo & Text',
     quality: `${getFormatLabel(framing.outputFormat)} Format & Size`,
     preview:
       activePlatform === 'line'
@@ -814,6 +1057,7 @@ export default function App() {
                 framing={effectiveFraming}
                 onUpdateFraming={handleUpdateFraming}
                 onResetFraming={handleResetFraming}
+                onReCenterSubject={handleReCenterSubject}
                 source={activeSource}
                 hasSource={Boolean(activeSource)}
                 edgeColor={activeSource?.edgeColor ?? '#F3EBDD'}
@@ -821,6 +1065,12 @@ export default function App() {
                 originalBytes={activeSource?.originalBytes ?? 0}
                 optimizedQuality={output.optimizedQuality}
                 isEncoding={output.encoding}
+                autoFitMatch={autoFitMatch}
+                onApplyAutoFit={handleApplyAutoFit}
+                logoAsset={logoAsset}
+                onSelectLogoFile={handleSelectLogoFile}
+                onClearLogo={handleClearLogo}
+                onUseMascotLogo={handleUseMascotLogo}
               />
             </div>
 
@@ -829,8 +1079,12 @@ export default function App() {
               queue={queue}
               activeItemId={activeItem?.id ?? null}
               source={activeSource}
+              logoAsset={logoAsset}
               preset={activePreset}
               framing={effectiveFraming}
+              autoFitMatch={autoFitMatch}
+              onApplyAutoFit={handleApplyAutoFit}
+              onCanvasVisibilityChange={setIsStageCanvasVisible}
               output={output}
               isDraggingFile={isDraggingFile}
               isLoadingSampleId={isLoadingSampleId}
@@ -901,6 +1155,7 @@ export default function App() {
                       framing={effectiveFraming}
                       onUpdateFraming={handleUpdateFraming}
                       onResetFraming={handleResetFraming}
+                      onReCenterSubject={handleReCenterSubject}
                       source={activeSource}
                       hasSource={Boolean(activeSource)}
                       edgeColor={activeSource?.edgeColor ?? '#F3EBDD'}
@@ -908,6 +1163,12 @@ export default function App() {
                       originalBytes={activeSource?.originalBytes ?? 0}
                       optimizedQuality={output.optimizedQuality}
                       isEncoding={output.encoding}
+                      autoFitMatch={autoFitMatch}
+                      onApplyAutoFit={handleApplyAutoFit}
+                      logoAsset={logoAsset}
+                      onSelectLogoFile={handleSelectLogoFile}
+                      onClearLogo={handleClearLogo}
+                      onUseMascotLogo={handleUseMascotLogo}
                       section={mobileTab}
                       embedded
                     />
@@ -928,6 +1189,21 @@ export default function App() {
               />
             </div>
           </div>
+
+          {activeSource && (
+            <FloatingLayerPreview
+              source={activeSource}
+              logoAsset={logoAsset}
+              preset={activePreset}
+              framing={effectiveFraming}
+              visible={!isStageCanvasVisible}
+              onJumpToStage={() =>
+                document
+                  .getElementById('main-stage-canvas')
+                  ?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+              }
+            />
+          )}
 
           <MobileBottomTabs
             activeTab={mobileTab}

@@ -9,19 +9,23 @@ import {
   Move,
   Plus,
   Share2,
+  Sparkles,
   Trash2,
   Upload,
   X,
 } from 'lucide-react';
 import { PLATFORM_CATEGORIES, SAMPLE_ASSETS } from '../data/presets';
 import {
+  AspectPresetMatch,
   BatchItem,
   EncodedOutput,
   FramingState,
   LinePreset,
+  LogoWatermarkAsset,
   SampleAsset,
   SourceAsset,
 } from '../types';
+import { getEffectiveSourceRect } from '../utils/autoFraming';
 import {
   computeCropGeometry,
   formatBytes,
@@ -38,8 +42,12 @@ interface FramingStageProps {
   queue: BatchItem[];
   activeItemId: string | null;
   source: SourceAsset | null;
+  logoAsset?: LogoWatermarkAsset | null;
   preset: LinePreset;
   framing: FramingState;
+  autoFitMatch?: AspectPresetMatch | null;
+  onApplyAutoFit?: () => void;
+  onCanvasVisibilityChange?: (visible: boolean) => void;
   output: EncodedOutput;
   isDraggingFile: boolean;
   isLoadingSampleId: string | null;
@@ -72,16 +80,56 @@ type GestureState =
       mode: 'pinch';
       startDist: number;
       startZoom: number;
+      lastDist: number;
+      lastMoveTs: number;
+      pinchVelocity: number;
       lastMidX: number;
       lastMidY: number;
     };
+
+interface ZoomAnimationState {
+  currentZoom: number;
+  targetZoom: number;
+  velocity: number;
+  currentOffsetX: number;
+  currentOffsetY: number;
+  targetOffsetX: number | null;
+  targetOffsetY: number | null;
+  anchorNorm: { x: number; y: number } | null;
+  animating: boolean;
+  rafId: number | null;
+  lastFrameTs: number;
+  lastCommitTs: number;
+  pendingSelfCommits: number[];
+  lastSeenEffectZoom: number;
+}
+
+function clampZoom(z: number): number {
+  return Math.max(1, Math.min(3, z));
+}
+
+function clampOffset(v: number): number {
+  return Math.max(-1, Math.min(1, v));
+}
+
+function prefersReducedMotion(): boolean {
+  return (
+    typeof window !== 'undefined' &&
+    typeof window.matchMedia === 'function' &&
+    window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  );
+}
 
 export function FramingStage({
   queue,
   activeItemId,
   source,
+  logoAsset = null,
   preset,
   framing,
+  autoFitMatch = null,
+  onApplyAutoFit,
+  onCanvasVisibilityChange,
   output,
   isDraggingFile,
   isLoadingSampleId,
@@ -107,6 +155,8 @@ export function FramingStage({
   const frameBoxRef = useRef<HTMLDivElement | null>(null);
 
   const [isPanning, setIsPanning] = useState(false);
+  const [isZoomingHud, setIsZoomingHud] = useState(false);
+  const [hudZoom, setHudZoom] = useState(framing.zoom);
   const [copiedJustNow, setCopiedJustNow] = useState(false);
   const [failedSampleImages, setFailedSampleImages] = useState<Record<string, boolean>>({});
 
@@ -114,28 +164,146 @@ export function FramingStage({
   const gestureRef = useRef<GestureState | null>(null);
   const latestFramingRef = useRef(framing);
   latestFramingRef.current = framing;
+  const latestSourceRef = useRef(source);
+  latestSourceRef.current = source;
+  const latestPresetRef = useRef(preset);
+  latestPresetRef.current = preset;
+  const latestLogoRef = useRef(logoAsset);
+  latestLogoRef.current = logoAsset;
+  const onUpdateFramingRef = useRef(onUpdateFraming);
+  onUpdateFramingRef.current = onUpdateFraming;
+  const hudHideTimeoutRef = useRef<number | null>(null);
+
+  const zoomAnimRef = useRef<ZoomAnimationState>({
+    currentZoom: framing.zoom,
+    targetZoom: framing.zoom,
+    velocity: 0,
+    currentOffsetX: framing.offsetX,
+    currentOffsetY: framing.offsetY,
+    targetOffsetX: null,
+    targetOffsetY: null,
+    anchorNorm: null,
+    animating: false,
+    rafId: null,
+    lastFrameTs: 0,
+    lastCommitTs: 0,
+    pendingSelfCommits: [],
+    lastSeenEffectZoom: framing.zoom,
+  });
 
   const targetW = preset.width * framing.scale;
   const targetH = preset.height * framing.scale;
   const isBatch = queue.length > 1;
   const activeIndex = queue.findIndex((item) => item.id === activeItemId);
 
-  // Render live interactive preview canvas at crisp display resolution
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas || !source) return;
-
+  const getPreviewDimensions = (p: LinePreset) => {
     const previewMaxDim = 1080;
-    const aspect = preset.width / preset.height;
+    const aspect = p.width / p.height;
     let previewW = previewMaxDim;
     let previewH = Math.round(previewMaxDim / aspect);
     if (previewH > previewMaxDim) {
       previewH = previewMaxDim;
       previewW = Math.round(previewMaxDim * aspect);
     }
+    return { previewW, previewH };
+  };
 
-    renderFramedCanvas(canvas, source, previewW, previewH, framing);
-  }, [source, preset, framing]);
+  // Sync external zoom/offset changes (e.g. sidebar slider, preset swap, Focus Subject)
+  useEffect(() => {
+    const anim = zoomAnimRef.current;
+    const zoomChanged = Math.abs(framing.zoom - anim.lastSeenEffectZoom) > 0.0005;
+    anim.lastSeenEffectZoom = framing.zoom;
+
+    if (!anim.animating) {
+      anim.currentZoom = framing.zoom;
+      anim.targetZoom = framing.zoom;
+      anim.currentOffsetX = framing.offsetX;
+      anim.currentOffsetY = framing.offsetY;
+      anim.pendingSelfCommits = [];
+      setHudZoom(framing.zoom);
+      return;
+    }
+
+    if (!zoomChanged) {
+      return;
+    }
+
+    // Check if this zoom update came from our own rAF throttled commit
+    const matchIdx = anim.pendingSelfCommits.findIndex(
+      (z) => Math.abs(z - framing.zoom) < 0.0008
+    );
+    if (matchIdx !== -1) {
+      anim.pendingSelfCommits.splice(0, matchIdx + 1);
+      return;
+    }
+
+    // External slider or preset action overrides in-flight inertia cleanly
+    if (anim.rafId !== null) {
+      cancelAnimationFrame(anim.rafId);
+      anim.rafId = null;
+    }
+    anim.animating = false;
+    anim.velocity = 0;
+    anim.targetOffsetX = null;
+    anim.targetOffsetY = null;
+    anim.pendingSelfCommits = [];
+    anim.currentZoom = framing.zoom;
+    anim.targetZoom = framing.zoom;
+    anim.currentOffsetX = framing.offsetX;
+    anim.currentOffsetY = framing.offsetY;
+    setHudZoom(framing.zoom);
+    setIsZoomingHud(false);
+  }, [framing.zoom, framing.offsetX, framing.offsetY]);
+
+  // Render live interactive preview canvas at crisp display resolution
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || !source) return;
+    if (zoomAnimRef.current.animating) return;
+
+    const { previewW, previewH } = getPreviewDimensions(preset);
+    renderFramedCanvas(canvas, source, previewW, previewH, framing, logoAsset);
+  }, [source, preset, framing, logoAsset]);
+
+  // Clean up any active rAF or HUD timer on unmount
+  useEffect(() => {
+    return () => {
+      if (zoomAnimRef.current.rafId !== null) {
+        cancelAnimationFrame(zoomAnimRef.current.rafId);
+        zoomAnimRef.current.rafId = null;
+      }
+      if (hudHideTimeoutRef.current !== null) {
+        window.clearTimeout(hudHideTimeoutRef.current);
+      }
+    };
+  }, []);
+
+  // Observe whether main stage canvas is visible in viewport for floating layer mini-preview
+  useEffect(() => {
+    if (!onCanvasVisibilityChange) return;
+    if (!source) {
+      onCanvasVisibilityChange(true);
+      return;
+    }
+    const el = frameBoxRef.current;
+    if (!el || typeof IntersectionObserver === 'undefined') {
+      onCanvasVisibilityChange(true);
+      return;
+    }
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const entry = entries[0];
+        if (!entry) return;
+        onCanvasVisibilityChange(entry.isIntersecting && entry.intersectionRatio >= 0.25);
+      },
+      { threshold: [0, 0.25, 0.6] }
+    );
+    observer.observe(el);
+    return () => {
+      observer.disconnect();
+    };
+  }, [source, onCanvasVisibilityChange]);
 
   const triggerFilePicker = (mode: 'append' | 'replace') => {
     pickerModeRef.current = mode;
@@ -150,29 +318,277 @@ export function FramingStage({
     e.target.value = '';
   };
 
+  const computeAnchoredOffsets = (
+    srcAsset: SourceAsset,
+    baseFraming: FramingState,
+    prevZoom: number,
+    nextZoom: number,
+    prevOffsetX: number,
+    prevOffsetY: number,
+    anchorNorm: { x: number; y: number } | null
+  ): { offsetX: number; offsetY: number } => {
+    if (!anchorNorm || !frameBoxRef.current) {
+      return { offsetX: prevOffsetX, offsetY: prevOffsetY };
+    }
+    const rect = frameBoxRef.current.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) {
+      return { offsetX: prevOffsetX, offsetY: prevOffsetY };
+    }
+    const { effectiveWidth: srcW, effectiveHeight: srcH } = getEffectiveSourceRect(
+      srcAsset,
+      baseFraming
+    );
+    const geomPrev = computeCropGeometry(srcW, srcH, rect.width, rect.height, {
+      ...baseFraming,
+      zoom: prevZoom,
+      offsetX: prevOffsetX,
+      offsetY: prevOffsetY,
+    });
+    const geomNext = computeCropGeometry(srcW, srcH, rect.width, rect.height, {
+      ...baseFraming,
+      zoom: nextZoom,
+      offsetX: prevOffsetX,
+      offsetY: prevOffsetY,
+    });
+
+    const cursorPxX = anchorNorm.x * rect.width;
+    const cursorPxY = anchorNorm.y * rect.height;
+    const fracX = (cursorPxX - geomPrev.drawX) / Math.max(1, geomPrev.drawWidth);
+    const fracY = (cursorPxY - geomPrev.drawY) / Math.max(1, geomPrev.drawHeight);
+
+    const desiredDrawX = cursorPxX - fracX * geomNext.drawWidth;
+    const desiredDrawY = cursorPxY - fracY * geomNext.drawHeight;
+
+    const nextOffsetX =
+      geomNext.maxShiftX > 1
+        ? clampOffset(
+            (desiredDrawX - (rect.width - geomNext.drawWidth) / 2) / geomNext.maxShiftX
+          )
+        : 0;
+    const nextOffsetY =
+      geomNext.maxShiftY > 1
+        ? clampOffset(
+            (desiredDrawY - (rect.height - geomNext.drawHeight) / 2) / geomNext.maxShiftY
+          )
+        : 0;
+
+    return { offsetX: nextOffsetX, offsetY: nextOffsetY };
+  };
+
+  const scheduleZoomHudHide = () => {
+    if (hudHideTimeoutRef.current !== null) {
+      window.clearTimeout(hudHideTimeoutRef.current);
+    }
+    hudHideTimeoutRef.current = window.setTimeout(() => {
+      setIsZoomingHud(false);
+    }, 950);
+  };
+
+  const ensureZoomLoop = () => {
+    const anim = zoomAnimRef.current;
+    if (anim.rafId !== null) return;
+
+    anim.animating = true;
+    anim.lastFrameTs = performance.now();
+
+    const step = (now: number) => {
+      const currentSource = latestSourceRef.current;
+      const canvas = canvasRef.current;
+      if (!currentSource || !canvas || latestFramingRef.current.fitMode !== 'crop') {
+        anim.animating = false;
+        anim.rafId = null;
+        return;
+      }
+
+      const dt = Math.min(0.05, Math.max(0.001, (now - anim.lastFrameTs) / 1000));
+      anim.lastFrameTs = now;
+
+      const prevZoom = anim.currentZoom;
+
+      // Apply inertial velocity to targetZoom and damp smoothly
+      if (Math.abs(anim.velocity) > 0.0005) {
+        const nextTarget = clampZoom(anim.targetZoom + anim.velocity * dt);
+        if (
+          (nextTarget <= 1 && anim.velocity < 0) ||
+          (nextTarget >= 3 && anim.velocity > 0)
+        ) {
+          anim.velocity = 0;
+        } else {
+          anim.velocity *= Math.exp(-9.2 * dt);
+        }
+        anim.targetZoom = nextTarget;
+      } else {
+        anim.velocity = 0;
+      }
+
+      // Exponential spring smoothing toward targetZoom (instant if reduced-motion)
+      const reduced = prefersReducedMotion();
+      const followRate = gestureRef.current?.mode === 'pinch' ? 28 : 19;
+      const alpha = reduced ? 1 : 1 - Math.exp(-followRate * dt);
+      const nextZoom = clampZoom(prevZoom + (anim.targetZoom - prevZoom) * alpha);
+
+      let nextOffsetX = anim.currentOffsetX;
+      let nextOffsetY = anim.currentOffsetY;
+
+      if (anim.targetOffsetX !== null && anim.targetOffsetY !== null) {
+        const panAlpha = reduced ? 1 : 1 - Math.exp(-16 * dt);
+        nextOffsetX = clampOffset(
+          anim.currentOffsetX + (anim.targetOffsetX - anim.currentOffsetX) * panAlpha
+        );
+        nextOffsetY = clampOffset(
+          anim.currentOffsetY + (anim.targetOffsetY - anim.currentOffsetY) * panAlpha
+        );
+      } else if (Math.abs(nextZoom - prevZoom) > 0.00005) {
+        const anchored = computeAnchoredOffsets(
+          currentSource,
+          latestFramingRef.current,
+          prevZoom,
+          nextZoom,
+          anim.currentOffsetX,
+          anim.currentOffsetY,
+          anim.anchorNorm
+        );
+        nextOffsetX = anchored.offsetX;
+        nextOffsetY = anchored.offsetY;
+      }
+
+      anim.currentZoom = nextZoom;
+      anim.currentOffsetX = nextOffsetX;
+      anim.currentOffsetY = nextOffsetY;
+
+      const frameSnapshot: FramingState = {
+        ...latestFramingRef.current,
+        zoom: nextZoom,
+        offsetX: nextOffsetX,
+        offsetY: nextOffsetY,
+      };
+      const { previewW, previewH } = getPreviewDimensions(latestPresetRef.current);
+      renderFramedCanvas(
+        canvas,
+        currentSource,
+        previewW,
+        previewH,
+        frameSnapshot,
+        latestLogoRef.current
+      );
+
+      setHudZoom(nextZoom);
+
+      const zoomSettled = Math.abs(anim.targetZoom - nextZoom) < 0.0012;
+      const velSettled = Math.abs(anim.velocity) < 0.008;
+      const panSettled =
+        anim.targetOffsetX === null ||
+        (Math.abs(anim.targetOffsetX - nextOffsetX) < 0.0012 &&
+          Math.abs((anim.targetOffsetY ?? 0) - nextOffsetY) < 0.0012);
+
+      if (zoomSettled && velSettled && panSettled) {
+        const finalZoom = +clampZoom(anim.targetZoom).toFixed(3);
+        const finalOffX = +(anim.targetOffsetX ?? nextOffsetX).toFixed(3);
+        const finalOffY = +(anim.targetOffsetY ?? nextOffsetY).toFixed(3);
+
+        anim.currentZoom = finalZoom;
+        anim.currentOffsetX = finalOffX;
+        anim.currentOffsetY = finalOffY;
+        anim.velocity = 0;
+        anim.targetOffsetX = null;
+        anim.targetOffsetY = null;
+        anim.animating = false;
+        anim.rafId = null;
+        anim.lastCommitTs = now;
+        if (Math.abs(finalZoom - anim.lastSeenEffectZoom) > 0.0005) {
+          anim.pendingSelfCommits.push(finalZoom);
+          if (anim.pendingSelfCommits.length > 16) anim.pendingSelfCommits.shift();
+        }
+
+        setHudZoom(finalZoom);
+        scheduleZoomHudHide();
+        onUpdateFramingRef.current({
+          zoom: finalZoom,
+          offsetX: finalOffX,
+          offsetY: finalOffY,
+        });
+        return;
+      }
+
+      // Throttled state sync (~48ms) so sidebar zoom slider stays live without React stutter
+      if (now - anim.lastCommitTs >= 48) {
+        const committedZoom = +nextZoom.toFixed(3);
+        anim.lastCommitTs = now;
+        if (Math.abs(committedZoom - anim.lastSeenEffectZoom) > 0.0005) {
+          anim.pendingSelfCommits.push(committedZoom);
+          if (anim.pendingSelfCommits.length > 16) anim.pendingSelfCommits.shift();
+        }
+        onUpdateFramingRef.current({
+          zoom: committedZoom,
+          offsetX: +nextOffsetX.toFixed(3),
+          offsetY: +nextOffsetY.toFixed(3),
+        });
+      }
+
+      anim.rafId = requestAnimationFrame(step);
+    };
+
+    anim.rafId = requestAnimationFrame(step);
+  };
+
+  const triggerSmoothZoomReset = () => {
+    const anim = zoomAnimRef.current;
+    if (prefersReducedMotion()) {
+      onUpdateFraming({ offsetX: 0, offsetY: 0, zoom: 1 });
+      return;
+    }
+    anim.velocity = 0;
+    anim.targetZoom = 1;
+    anim.targetOffsetX = 0;
+    anim.targetOffsetY = 0;
+    anim.anchorNorm = null;
+    setIsZoomingHud(true);
+    ensureZoomLoop();
+  };
+
   const handlePointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
     if (!source || latestFramingRef.current.fitMode !== 'crop') return;
-    e.currentTarget.setPointerCapture(e.pointerId);
     pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId);
+    } catch {
+      // Ignore synthetic or already-ended pointers that cannot be captured
+    }
 
     const active = Array.from(pointersRef.current.values());
     if (active.length === 1) {
+      // Cancel any residual wheel/pinch zoom target pan override when user grabs to pan
+      zoomAnimRef.current.targetOffsetX = null;
+      zoomAnimRef.current.targetOffsetY = null;
       setIsPanning(true);
       gestureRef.current = {
         mode: 'pan',
         startX: active[0].x,
         startY: active[0].y,
-        startOffsetX: latestFramingRef.current.offsetX,
-        startOffsetY: latestFramingRef.current.offsetY,
+        startOffsetX: zoomAnimRef.current.animating
+          ? zoomAnimRef.current.currentOffsetX
+          : latestFramingRef.current.offsetX,
+        startOffsetY: zoomAnimRef.current.animating
+          ? zoomAnimRef.current.currentOffsetY
+          : latestFramingRef.current.offsetY,
       };
     } else if (active.length >= 2) {
       setIsPanning(true);
       const [p1, p2] = active;
       const dist = Math.max(10, Math.hypot(p2.x - p1.x, p2.y - p1.y));
+      const baseZoom = zoomAnimRef.current.animating
+        ? zoomAnimRef.current.currentZoom
+        : latestFramingRef.current.zoom;
+      zoomAnimRef.current.velocity = 0;
+      zoomAnimRef.current.targetOffsetX = null;
+      zoomAnimRef.current.targetOffsetY = null;
       gestureRef.current = {
         mode: 'pinch',
         startDist: dist,
-        startZoom: latestFramingRef.current.zoom,
+        startZoom: baseZoom,
+        lastDist: dist,
+        lastMoveTs: performance.now(),
+        pinchVelocity: 0,
         lastMidX: (p1.x + p2.x) / 2,
         lastMidY: (p1.y + p2.y) / 2,
       };
@@ -188,80 +604,126 @@ export function FramingStage({
 
     const active = Array.from(pointersRef.current.values());
     const currentFraming = latestFramingRef.current;
+    const { effectiveWidth: srcW, effectiveHeight: srcH } = getEffectiveSourceRect(
+      source,
+      currentFraming
+    );
 
     if (active.length === 1 && gestureRef.current?.mode === 'pan') {
-      const geom = computeCropGeometry(
-        source.naturalWidth,
-        source.naturalHeight,
-        rect.width,
-        rect.height,
-        currentFraming
-      );
+      const activeZoom = zoomAnimRef.current.animating
+        ? zoomAnimRef.current.currentZoom
+        : currentFraming.zoom;
+      const geom = computeCropGeometry(srcW, srcH, rect.width, rect.height, {
+        ...currentFraming,
+        zoom: activeZoom,
+      });
 
       const dx = active[0].x - gestureRef.current.startX;
       const dy = active[0].y - gestureRef.current.startY;
 
       const nextOffsetX =
         geom.maxShiftX > 1
-          ? Math.max(-1, Math.min(1, gestureRef.current.startOffsetX + dx / geom.maxShiftX))
+          ? clampOffset(gestureRef.current.startOffsetX + dx / geom.maxShiftX)
           : 0;
       const nextOffsetY =
         geom.maxShiftY > 1
-          ? Math.max(-1, Math.min(1, gestureRef.current.startOffsetY + dy / geom.maxShiftY))
+          ? clampOffset(gestureRef.current.startOffsetY + dy / geom.maxShiftY)
           : 0;
 
+      zoomAnimRef.current.currentOffsetX = nextOffsetX;
+      zoomAnimRef.current.currentOffsetY = nextOffsetY;
       onUpdateFraming({ offsetX: nextOffsetX, offsetY: nextOffsetY });
     } else if (active.length >= 2 && gestureRef.current?.mode === 'pinch') {
+      const now = performance.now();
       const [p1, p2] = active;
-      const dist = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+      const dist = Math.max(10, Math.hypot(p2.x - p1.x, p2.y - p1.y));
       const midX = (p1.x + p2.x) / 2;
       const midY = (p1.y + p2.y) / 2;
 
-      const nextZoom = Math.max(
-        1,
-        Math.min(3, +(gestureRef.current.startZoom * (dist / gestureRef.current.startDist)).toFixed(3))
+      const nextTargetZoom = clampZoom(
+        gestureRef.current.startZoom * (dist / gestureRef.current.startDist)
       );
 
-      const geom = computeCropGeometry(
-        source.naturalWidth,
-        source.naturalHeight,
-        rect.width,
-        rect.height,
-        { ...currentFraming, zoom: nextZoom }
+      const moveDt = Math.max(0.008, (now - gestureRef.current.lastMoveTs) / 1000);
+      const prevTargetZoom = clampZoom(
+        gestureRef.current.startZoom * (gestureRef.current.lastDist / gestureRef.current.startDist)
       );
+      const instVel = (nextTargetZoom - prevTargetZoom) / moveDt;
+      gestureRef.current.pinchVelocity =
+        gestureRef.current.pinchVelocity * 0.55 +
+        Math.max(-3.5, Math.min(3.5, instVel)) * 0.45;
+      gestureRef.current.lastDist = dist;
+      gestureRef.current.lastMoveTs = now;
+
+      const geom = computeCropGeometry(srcW, srcH, rect.width, rect.height, {
+        ...currentFraming,
+        zoom: nextTargetZoom,
+      });
 
       const dMidX = midX - gestureRef.current.lastMidX;
       const dMidY = midY - gestureRef.current.lastMidY;
       gestureRef.current.lastMidX = midX;
       gestureRef.current.lastMidY = midY;
 
-      const nextOffsetX =
-        geom.maxShiftX > 1
-          ? Math.max(-1, Math.min(1, currentFraming.offsetX + dMidX / geom.maxShiftX))
-          : 0;
-      const nextOffsetY =
-        geom.maxShiftY > 1
-          ? Math.max(-1, Math.min(1, currentFraming.offsetY + dMidY / geom.maxShiftY))
-          : 0;
+      const anim = zoomAnimRef.current;
+      const curOffX = anim.animating ? anim.currentOffsetX : currentFraming.offsetX;
+      const curOffY = anim.animating ? anim.currentOffsetY : currentFraming.offsetY;
 
-      onUpdateFraming({ zoom: nextZoom, offsetX: nextOffsetX, offsetY: nextOffsetY });
+      anim.currentOffsetX =
+        geom.maxShiftX > 1 ? clampOffset(curOffX + dMidX / geom.maxShiftX) : 0;
+      anim.currentOffsetY =
+        geom.maxShiftY > 1 ? clampOffset(curOffY + dMidY / geom.maxShiftY) : 0;
+      anim.targetZoom = nextTargetZoom;
+      anim.velocity = 0;
+      anim.anchorNorm = {
+        x: Math.max(0, Math.min(1, (midX - rect.left) / rect.width)),
+        y: Math.max(0, Math.min(1, (midY - rect.top) / rect.height)),
+      };
+
+      setIsZoomingHud(true);
+      ensureZoomLoop();
     }
   };
 
   const handlePointerUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
-      e.currentTarget.releasePointerCapture(e.pointerId);
-    }
     pointersRef.current.delete(e.pointerId);
+    try {
+      if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+        e.currentTarget.releasePointerCapture(e.pointerId);
+      }
+    } catch {
+      // Ignore capture release errors on synthetic/ended pointers
+    }
 
+    const prevGesture = gestureRef.current;
     const remaining = Array.from(pointersRef.current.values());
+
+    if (prevGesture?.mode === 'pinch' && remaining.length < 2) {
+      // Release pinch with inertial momentum carry-over
+      const carryVel =
+        performance.now() - prevGesture.lastMoveTs < 140
+          ? Math.max(-2.8, Math.min(2.8, prevGesture.pinchVelocity * 0.35))
+          : 0;
+      if (Math.abs(carryVel) > 0.08 && !prefersReducedMotion()) {
+        zoomAnimRef.current.velocity = carryVel;
+        setIsZoomingHud(true);
+        ensureZoomLoop();
+      } else {
+        scheduleZoomHudHide();
+      }
+    }
+
     if (remaining.length === 1) {
       gestureRef.current = {
         mode: 'pan',
         startX: remaining[0].x,
         startY: remaining[0].y,
-        startOffsetX: latestFramingRef.current.offsetX,
-        startOffsetY: latestFramingRef.current.offsetY,
+        startOffsetX: zoomAnimRef.current.animating
+          ? zoomAnimRef.current.currentOffsetX
+          : latestFramingRef.current.offsetX,
+        startOffsetY: zoomAnimRef.current.animating
+          ? zoomAnimRef.current.currentOffsetY
+          : latestFramingRef.current.offsetY,
       };
     } else if (remaining.length === 0) {
       setIsPanning(false);
@@ -275,16 +737,57 @@ export function FramingStage({
 
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
-      const delta = -e.deltaY * 0.0015;
-      const nextZoom = Math.max(1, Math.min(3, +(framing.zoom + delta).toFixed(3)));
-      onUpdateFraming({ zoom: nextZoom });
+      const rect = frameBoxRef.current?.getBoundingClientRect();
+      const normAnchor =
+        rect && rect.width > 0 && rect.height > 0
+          ? {
+              x: Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width)),
+              y: Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height)),
+            }
+          : null;
+
+      // Normalize wheel delta across trackpad pixels, line-scroll mice, and page scrolls
+      const pixelDelta =
+        e.deltaMode === 1
+          ? e.deltaY * 32
+          : e.deltaMode === 2
+          ? e.deltaY * 360
+          : e.deltaY;
+      const impulse = Math.max(-0.32, Math.min(0.32, -pixelDelta * 0.0016));
+      if (Math.abs(impulse) < 0.0005) return;
+
+      const anim = zoomAnimRef.current;
+      if (!anim.animating) {
+        anim.currentZoom = latestFramingRef.current.zoom;
+        anim.targetZoom = latestFramingRef.current.zoom;
+        anim.currentOffsetX = latestFramingRef.current.offsetX;
+        anim.currentOffsetY = latestFramingRef.current.offsetY;
+      }
+      anim.targetOffsetX = null;
+      anim.targetOffsetY = null;
+      anim.anchorNorm = normAnchor;
+
+      if (prefersReducedMotion()) {
+        const nextZoom = clampZoom(anim.targetZoom + impulse);
+        anim.targetZoom = nextZoom;
+        anim.velocity = 0;
+      } else {
+        anim.targetZoom = clampZoom(anim.targetZoom + impulse * 0.85);
+        anim.velocity = Math.max(
+          -3.6,
+          Math.min(3.6, anim.velocity * 0.45 + impulse * 3.4)
+        );
+      }
+
+      setIsZoomingHud(true);
+      ensureZoomLoop();
     };
 
     canvas.addEventListener('wheel', onWheel, { passive: false });
     return () => {
       canvas.removeEventListener('wheel', onWheel);
     };
-  }, [source, framing.fitMode, framing.zoom, onUpdateFraming]);
+  }, [source, framing.fitMode]);
 
   const handleCopyClick = async () => {
     await onCopyImage();
@@ -293,9 +796,11 @@ export function FramingStage({
   };
 
   // Detect quality / platform spec warnings
+  const effectiveDims = source ? getEffectiveSourceRect(source, framing) : null;
   const isUpscaled =
-    source !== null &&
-    (source.naturalWidth < targetW * 0.85 || source.naturalHeight < targetH * 0.85);
+    effectiveDims !== null &&
+    (effectiveDims.effectiveWidth < targetW * 0.85 ||
+      effectiveDims.effectiveHeight < targetH * 0.85);
   const exceedsLimit = output.bytes > preset.maxSizeMb * 1024 * 1024;
   const isHeavyForPlatform =
     !exceedsLimit &&
@@ -312,7 +817,10 @@ export function FramingStage({
   const resolvedMatteHex = resolveMatteColor(source, framing);
 
   return (
-    <main className="relative flex min-w-0 flex-1 flex-col bg-[#FAF6EE]">
+    <main
+      id="main-stage-canvas"
+      className="relative flex min-w-0 flex-1 flex-col bg-[#FAF6EE] lg:sticky lg:top-2 lg:self-start"
+    >
       <input
         ref={fileInputRef}
         type="file"
@@ -489,6 +997,38 @@ export function FramingStage({
                 <span className="hidden font-mono tabular-nums whitespace-nowrap sm:inline">
                   {source.naturalWidth}×{source.naturalHeight}
                 </span>
+                {source.autoCrop?.detectionMethod === 'face-api' && (
+                  <>
+                    <span aria-hidden="true" className="hidden md:inline">·</span>
+                    <span className="hidden whitespace-nowrap md:inline">
+                      Face headroom
+                    </span>
+                  </>
+                )}
+                {source.autoCrop?.detectionMethod === 'portrait-heuristic' && (
+                  <>
+                    <span aria-hidden="true" className="hidden md:inline">·</span>
+                    <span className="hidden whitespace-nowrap md:inline">
+                      Portrait lock
+                    </span>
+                  </>
+                )}
+                {autoFitMatch && autoFitMatch.preset.id !== preset.id && onApplyAutoFit && (
+                  <>
+                    <span aria-hidden="true">·</span>
+                    <button
+                      type="button"
+                      onClick={onApplyAutoFit}
+                      title={`Detected ${autoFitMatch.sourceRatioLabel} (${autoFitMatch.orientation}) — click to switch to ${autoFitMatch.platformLabel} ${autoFitMatch.preset.shortName}`}
+                      className="inline-flex items-center gap-1 rounded-md border border-[#D97706]/45 bg-[#D97706]/10 px-2 py-0.5 text-[11px] font-semibold text-[#A14B00] transition-colors hover:border-[#C25E00] hover:bg-[#D97706]/20 whitespace-nowrap"
+                    >
+                      <Sparkles className="h-3 w-3 shrink-0 text-[#C25E00]" aria-hidden="true" />
+                      <span>
+                        Auto-Fit · {autoFitMatch.platformLabel} {autoFitMatch.preset.ratioLabel}
+                      </span>
+                    </button>
+                  </>
+                )}
               </div>
             </div>
 
@@ -618,9 +1158,7 @@ export function FramingStage({
                 onPointerMove={handlePointerMove}
                 onPointerUp={handlePointerUp}
                 onPointerCancel={handlePointerUp}
-                onDoubleClick={() =>
-                  onUpdateFraming({ offsetX: 0, offsetY: 0, zoom: 1 })
-                }
+                onDoubleClick={triggerSmoothZoomReset}
                 className={`block h-full w-full touch-none select-none ${
                   framing.fitMode === 'crop'
                     ? isPanning
@@ -629,6 +1167,16 @@ export function FramingStage({
                     : 'cursor-default'
                 }`}
               />
+
+              {/* Live Inertial Zoom HUD Readout */}
+              {framing.fitMode === 'crop' && (isZoomingHud || hudZoom > 1.01) && (
+                <div
+                  aria-live="polite"
+                  className="pointer-events-none absolute right-2.5 bottom-2.5 rounded-md bg-[#2B1E16]/82 px-2 py-0.5 font-mono text-[11px] font-semibold tabular-nums text-[#FFFDF8] shadow-xs backdrop-blur-[2px] transition-opacity duration-150"
+                >
+                  {hudZoom.toFixed(2)}×
+                </div>
+              )}
 
               {/* Optional Rule-of-Thirds Overlay */}
               {framing.showGrid && framing.fitMode === 'crop' && (
@@ -829,6 +1377,39 @@ export function FramingStage({
                     </span>
                   </>
                 )}
+                {framing.autoCropEnabled && source.autoCrop?.hasTrimmedMargins && (
+                  <>
+                    <span aria-hidden="true">·</span>
+                    <span className="font-mono text-[11px] text-[#4A3628] whitespace-nowrap">
+                      Trimmed {source.autoCrop.trimmedPercent}%
+                    </span>
+                  </>
+                )}
+                {framing.bgRemoval.enabled && (
+                  <>
+                    <span aria-hidden="true">·</span>
+                    <span className="font-mono text-[11px] font-medium text-[#C25E00] whitespace-nowrap">
+                      BG removed
+                    </span>
+                  </>
+                )}
+                {logoAsset && framing.logoWatermark.enabled && (
+                  <>
+                    <span aria-hidden="true">·</span>
+                    <span className="font-mono text-[11px] text-[#4A3628] whitespace-nowrap">
+                      Logo{framing.logoWatermark.bgRemoval.enabled ? ' (cutout)' : ''}
+                    </span>
+                  </>
+                )}
+                {framing.textWatermark.enabled &&
+                  framing.textWatermark.text.trim().length > 0 && (
+                    <>
+                      <span aria-hidden="true">·</span>
+                      <span className="font-mono text-[11px] text-[#4A3628] whitespace-nowrap">
+                        Text layer
+                      </span>
+                    </>
+                  )}
               </div>
 
               {framing.fitMode === 'crop' && (

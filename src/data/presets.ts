@@ -421,8 +421,53 @@ export function resolveActivePreset(
   };
 }
 
+export const DEFAULT_BG_REMOVAL = {
+  enabled: false,
+  mode: 'auto-edge' as const,
+  tolerance: 28,
+  smoothness: 3,
+  edgeTrim: 0,
+  removeInteriorHoles: true,
+  defringe: true,
+  targetColor: '#FFFFFF',
+};
+
+export const DEFAULT_LOGO_WATERMARK = {
+  enabled: true,
+  sizePercent: 18,
+  opacity: 0.9,
+  position: 'bottom-right' as const,
+  marginPercent: 5,
+  rotation: 0,
+  bgRemoval: {
+    ...DEFAULT_BG_REMOVAL,
+    enabled: false,
+  },
+};
+
+export const DEFAULT_TEXT_WATERMARK = {
+  enabled: false,
+  text: '© Koto Studio',
+  fontStyle: 'display' as const,
+  bold: true,
+  italic: false,
+  sizePercent: 5,
+  color: '#FFFFFF',
+  opacity: 0.9,
+  position: 'bottom-left' as const,
+  marginPercent: 5,
+  rotation: 0,
+  strokeEnabled: true,
+  strokeColor: '#2B1E16',
+  shadowEnabled: true,
+  badgeEnabled: false,
+  badgeColor: '#2B1E16',
+  badgeOpacity: 0.72,
+};
+
 export const DEFAULT_FRAMING: FramingState = {
   fitMode: 'crop',
+  autoCropEnabled: true,
   offsetX: 0,
   offsetY: 0,
   zoom: 1,
@@ -443,6 +488,12 @@ export const DEFAULT_FRAMING: FramingState = {
   customWidth: 1200,
   customHeight: 1200,
   lockCustomAspect: false,
+  bgRemoval: { ...DEFAULT_BG_REMOVAL },
+  logoWatermark: {
+    ...DEFAULT_LOGO_WATERMARK,
+    bgRemoval: { ...DEFAULT_BG_REMOVAL },
+  },
+  textWatermark: { ...DEFAULT_TEXT_WATERMARK },
 };
 
 export const DEFAULT_PREVIEW_COPY: PreviewCopy = {

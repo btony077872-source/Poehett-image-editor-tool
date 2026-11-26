@@ -1,5 +1,5 @@
 import JSZip from 'jszip';
-import { BatchItem, FramingState, LinePreset, OutputFormat } from '../types';
+import { BatchItem, FramingState, LinePreset, LogoWatermarkAsset, OutputFormat } from '../types';
 import {
   buildOutputFilename,
   encodeImageOutput,
@@ -64,7 +64,8 @@ export async function buildBatchZipArchive(
   preset: LinePreset,
   sharedFraming: FramingState,
   onProgress?: (completed: number, total: number) => void,
-  customPrefix = ''
+  customPrefix = '',
+  logoAsset?: LogoWatermarkAsset | null
 ): Promise<ZipBuildResult> {
   const zip = new JSZip();
   const usedNames = new Set<string>();
@@ -82,7 +83,7 @@ export async function buildBatchZipArchive(
       zoom: item.zoom,
     };
 
-    const { blob } = await encodeImageOutput(item.asset, preset, itemFraming);
+    const { blob } = await encodeImageOutput(item.asset, preset, itemFraming, logoAsset);
     totalImageBytes += blob.size;
 
     const rawName = buildBatchExportFilename(

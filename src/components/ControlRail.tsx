@@ -1,5 +1,6 @@
 import {
   ArrowLeftRight,
+  Crop,
   Grid3X3,
   Lock,
   RotateCcw,
@@ -8,9 +9,11 @@ import {
 } from 'lucide-react';
 import { LINE_PRESETS, PLATFORM_CATEGORIES } from '../data/presets';
 import {
+  AspectPresetMatch,
   FitMode,
   FramingState,
   LinePreset,
+  LogoWatermarkAsset,
   MatteMode,
   OutputFormat,
   PadBackdrop,
@@ -24,6 +27,7 @@ import {
   recommendOutputFormat,
   resolveMatteColor,
 } from '../utils/imageEngine';
+import { LayersPanel } from './LayersPanel';
 import { PlatformLogo } from './PlatformLogo';
 
 interface ControlRailProps {
@@ -34,6 +38,7 @@ interface ControlRailProps {
   framing: FramingState;
   onUpdateFraming: (patch: Partial<FramingState>) => void;
   onResetFraming: () => void;
+  onReCenterSubject: () => void;
   source: SourceAsset | null;
   hasSource: boolean;
   edgeColor: string;
@@ -41,7 +46,13 @@ interface ControlRailProps {
   originalBytes: number;
   optimizedQuality?: number;
   isEncoding: boolean;
-  section?: 'all' | 'presets' | 'fit' | 'quality';
+  autoFitMatch: AspectPresetMatch | null;
+  onApplyAutoFit: () => void;
+  logoAsset: LogoWatermarkAsset | null;
+  onSelectLogoFile: (file: File) => void;
+  onClearLogo: () => void;
+  onUseMascotLogo: () => void;
+  section?: 'all' | 'presets' | 'fit' | 'layers' | 'quality';
   embedded?: boolean;
 }
 
@@ -74,6 +85,7 @@ export function ControlRail({
   framing,
   onUpdateFraming,
   onResetFraming,
+  onReCenterSubject,
   source,
   hasSource,
   edgeColor,
@@ -81,6 +93,12 @@ export function ControlRail({
   originalBytes,
   optimizedQuality,
   isEncoding,
+  autoFitMatch,
+  onApplyAutoFit,
+  logoAsset,
+  onSelectLogoFile,
+  onClearLogo,
+  onUseMascotLogo,
   section = 'all',
   embedded = false,
 }: ControlRailProps) {
@@ -94,6 +112,7 @@ export function ControlRail({
   const formatLabel = getFormatLabel(framing.outputFormat);
   const resolvedMatteHex = resolveMatteColor(source, framing);
   const recommendation = source ? recommendOutputFormat(source) : null;
+  const hasEffectiveAlpha = Boolean(source?.hasTransparency || framing.bgRemoval.enabled);
   const needsMatte = !formatSupportsAlpha || !framing.preserveTransparency;
 
   const sizeDeltaPercent =
@@ -153,6 +172,7 @@ export function ControlRail({
 
   const showPresets = section === 'all' || section === 'presets';
   const showFit = section === 'all' || section === 'fit';
+  const showLayers = section === 'all' || section === 'layers';
   const showQuality = section === 'all' || section === 'quality';
 
   const idPrefix = embedded ? 'mobile-' : '';
@@ -177,6 +197,82 @@ export function ControlRail({
                 {activePreset.ratioLabel}
               </span>
             </div>
+
+            {/* Auto-Fit Orientation-Locked Detection & Top-2 Alternatives */}
+            {source && autoFitMatch && (
+              <div className="mb-3 rounded-lg border border-[#E4D7C3] bg-[#FAF6EE] p-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <p className="font-mono text-[11px] font-semibold tabular-nums text-[#2B1E16] truncate">
+                      Input {autoFitMatch.sourceRatioLabel} ·{' '}
+                      {autoFitMatch.orientation === 'portrait'
+                        ? 'Portrait Lock'
+                        : autoFitMatch.orientation === 'landscape'
+                        ? 'Landscape Lock'
+                        : 'Square'}
+                    </p>
+                    <p className="mt-0.5 truncate text-[11px] text-[#6E5849]">
+                      {autoFitMatch.preset.id === activePreset.id
+                        ? `Matched: ${autoFitMatch.platformLabel} ${autoFitMatch.preset.shortName}`
+                        : `Closest: ${autoFitMatch.platformLabel} ${autoFitMatch.preset.ratioLabel}`}
+                      {source.autoCrop?.detectionMethod === 'face-api'
+                        ? ' · Face headroom'
+                        : source.autoCrop?.detectionMethod === 'portrait-heuristic'
+                        ? ' · Portrait lock'
+                        : source.autoCrop?.detectionMethod === 'focal-contrast'
+                        ? ' · Focal contrast'
+                        : ''}
+                    </p>
+                  </div>
+
+                  {autoFitMatch.preset.id !== activePreset.id ? (
+                    <button
+                      type="button"
+                      onClick={onApplyAutoFit}
+                      aria-label={`Auto-Fit to ${autoFitMatch.platformLabel} ${autoFitMatch.preset.shortName}`}
+                      className="inline-flex shrink-0 items-center gap-1 rounded-md bg-[#C25E00] px-2.5 py-1 text-[11px] font-semibold text-white transition-colors hover:bg-[#A14B00] whitespace-nowrap"
+                    >
+                      <Sparkles className="h-3 w-3 shrink-0" aria-hidden="true" />
+                      <span>Auto-Fit</span>
+                    </button>
+                  ) : (
+                    <span className="font-mono text-[11px] font-semibold text-[#15803D] whitespace-nowrap shrink-0">
+                      Auto-Fit ✓
+                    </span>
+                  )}
+                </div>
+
+                {autoFitMatch.alternatives.length > 0 && (
+                  <div className="mt-2 flex flex-wrap items-center gap-1.5 pt-2 border-t border-[#E4D7C3]/70">
+                    <span className="text-[10px] font-medium text-[#8D7564] whitespace-nowrap">
+                      Also fits:
+                    </span>
+                    {autoFitMatch.alternatives.map((alt) => {
+                      const isCurrent = alt.preset.id === activePreset.id;
+                      return (
+                        <button
+                          key={alt.preset.id}
+                          type="button"
+                          onClick={() => onSelectPreset(alt.preset.id)}
+                          aria-pressed={isCurrent}
+                          aria-label={`Switch to alternative ${alt.platformLabel} ${alt.preset.shortName}`}
+                          className={`inline-flex items-center gap-1 rounded border px-2 py-0.5 text-[11px] font-medium transition-colors whitespace-nowrap ${
+                            isCurrent
+                              ? 'border-[#D97706] bg-[#D97706]/12 text-[#2B1E16]'
+                              : 'border-[#E4D7C3] bg-[#FFFDF8] text-[#4A3628] hover:border-[#C25E00] hover:text-[#2B1E16]'
+                          }`}
+                        >
+                          <span>{alt.platformLabel}</span>
+                          <span className="font-mono tabular-nums text-[#6E5849]">
+                            {alt.preset.ratioLabel}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Category Switcher with Brand Logos */}
             <div
@@ -440,11 +536,11 @@ export function ControlRail({
 
                   <button
                     type="button"
-                    disabled={!hasSource || (framing.offsetX === 0 && framing.offsetY === 0)}
-                    onClick={() => onUpdateFraming({ offsetX: 0, offsetY: 0 })}
-                    className="min-h-[40px] rounded-lg border border-[#E4D7C3] bg-[#FFFDF8] px-3 py-1.5 text-xs font-medium text-[#6E5849] transition-colors hover:border-[#CBB89D] hover:text-[#2B1E16] disabled:cursor-not-allowed disabled:opacity-45 lg:min-h-0 whitespace-nowrap"
+                    disabled={!hasSource}
+                    onClick={onReCenterSubject}
+                    className="min-h-[40px] rounded-lg border border-[#E4D7C3] bg-[#FFFDF8] px-3 py-1.5 text-xs font-medium text-[#6E5849] transition-colors hover:border-[#C25E00] hover:text-[#2B1E16] disabled:cursor-not-allowed disabled:opacity-45 lg:min-h-0 whitespace-nowrap"
                   >
-                    Center
+                    {source?.autoCrop ? 'Focus Subject' : 'Center'}
                   </button>
                 </div>
               </div>
@@ -573,10 +669,75 @@ export function ControlRail({
                 </div>
               </div>
             )}
+
+            {/* Auto-Crop Margins & Subject Centering */}
+            <div className="mt-3.5 border-t border-[#E4D7C3] pt-3">
+              <div className="flex items-center justify-between gap-2">
+                <div className="min-w-0">
+                  <label
+                    htmlFor={`${idPrefix}auto-crop-switch`}
+                    className="flex items-center gap-1.5 text-xs font-medium text-[#2B1E16]"
+                  >
+                    <Crop className="h-3.5 w-3.5 text-[#C25E00]" aria-hidden="true" />
+                    <span>Auto-Crop Margins</span>
+                  </label>
+                  <p className="text-[11px] text-[#6E5849]">
+                    {source?.autoCrop?.hasTrimmedMargins
+                      ? framing.autoCropEnabled
+                        ? `Trimmed ${source.autoCrop.trimmedPercent}% blank border · ${
+                            source.autoCrop.isPortraitSubject
+                              ? 'Portrait headroom locked'
+                              : 'Focal point centered'
+                          }`
+                        : `${source.autoCrop.trimmedPercent}% border margin detected (off)`
+                      : source?.autoCrop?.detectionMethod === 'face-api'
+                      ? `Face detected (${source.autoCrop.faceCount}) · Headroom safe`
+                      : source?.autoCrop?.detectionMethod === 'portrait-heuristic'
+                      ? 'Portrait region · Upper-third headroom'
+                      : source?.autoCrop?.detectionMethod === 'focal-contrast'
+                      ? 'High-contrast focal point centered'
+                      : 'Trim empty borders & center subject'}
+                  </p>
+                </div>
+                <button
+                  id={`${idPrefix}auto-crop-switch`}
+                  type="button"
+                  role="switch"
+                  aria-checked={framing.autoCropEnabled}
+                  onClick={() =>
+                    onUpdateFraming({ autoCropEnabled: !framing.autoCropEnabled })
+                  }
+                  className={`relative inline-flex h-6 w-10 shrink-0 cursor-pointer items-center rounded-full transition-colors duration-150 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#C25E00] ${
+                    framing.autoCropEnabled ? 'bg-[#C25E00]' : 'bg-[#D6C5AD]'
+                  }`}
+                >
+                  <span
+                    className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform duration-150 ${
+                      framing.autoCropEnabled ? 'translate-x-5' : 'translate-x-1'
+                    }`}
+                  />
+                </button>
+              </div>
+            </div>
           </section>
         )}
 
-        {/* Section 3: Output Format, Quality & Scale */}
+        {/* Section 3: Background Remover, Watermark Logo & Text Generator */}
+        {showLayers && (
+          <LayersPanel
+            idPrefix={idPrefix}
+            embedded={embedded}
+            source={source}
+            framing={framing}
+            logoAsset={logoAsset}
+            onUpdateFraming={onUpdateFraming}
+            onSelectLogoFile={onSelectLogoFile}
+            onClearLogo={onClearLogo}
+            onUseMascotLogo={onUseMascotLogo}
+          />
+        )}
+
+        {/* Section 4: Output Format, Quality & Scale */}
         {showQuality && (
           <section className={embedded ? 'p-4' : 'p-5'}>
             <div className="mb-3 flex items-baseline justify-between gap-2">
@@ -615,7 +776,7 @@ export function ControlRail({
                           };
                           if (
                             nextFormat !== 'jpeg' &&
-                            source.hasTransparency &&
+                            hasEffectiveAlpha &&
                             framing.fitMode === 'pad'
                           ) {
                             patch.padBackdrop = 'transparent';
@@ -660,7 +821,7 @@ export function ControlRail({
                           }
                           if (
                             fmt.id !== 'jpeg' &&
-                            source?.hasTransparency &&
+                            hasEffectiveAlpha &&
                             framing.preserveTransparency &&
                             framing.fitMode === 'pad' &&
                             framing.padBackdrop === 'white'
@@ -775,7 +936,7 @@ export function ControlRail({
                         };
                         if (
                           nextPreserve &&
-                          source?.hasTransparency &&
+                          hasEffectiveAlpha &&
                           framing.fitMode === 'pad' &&
                           framing.padBackdrop === 'white'
                         ) {
@@ -798,9 +959,11 @@ export function ControlRail({
                       />
                     </button>
                   </div>
-                  {framing.preserveTransparency && source?.hasTransparency && (
+                  {framing.preserveTransparency && hasEffectiveAlpha && (
                     <p className="text-[11px] font-medium text-[#15803D]">
-                      Transparent alpha channel ({source.transparencyPercent}%) preserved in {formatLabel}.
+                      {framing.bgRemoval.enabled
+                        ? `Removed background alpha preserved in ${formatLabel}.`
+                        : `Transparent alpha channel (${source?.transparencyPercent ?? 0}%) preserved in ${formatLabel}.`}
                     </p>
                   )}
                 </div>
@@ -825,9 +988,11 @@ export function ControlRail({
                     </span>
                   </div>
 
-                  {source?.hasTransparency ? (
+                  {hasEffectiveAlpha ? (
                     <p className="mb-2.5 text-[11px] leading-snug text-[#6E5849]">
-                      Transparent areas ({source.transparencyPercent}%) automatically filled with this matte color.
+                      {framing.bgRemoval.enabled
+                        ? 'Background-removed transparent areas filled with this matte color.'
+                        : `Transparent areas (${source?.transparencyPercent ?? 0}%) automatically filled with this matte color.`}
                     </p>
                   ) : (
                     <p className="mb-2.5 text-[11px] leading-snug text-[#6E5849]">
@@ -840,7 +1005,7 @@ export function ControlRail({
                       [
                         { id: 'white', label: 'White', color: '#FFFFFF' },
                         { id: 'edge', label: 'Edge', color: edgeColor },
-                        { id: 'black', label: 'Dark', color: '#2B1E16' },
+                        { id: 'black', label: 'Dark', color: '#0F172A' },
                         { id: 'custom', label: 'Custom', color: framing.matteColor },
                       ] as { id: MatteMode; label: string; color: string }[]
                     ).map((m) => {

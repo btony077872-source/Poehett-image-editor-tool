@@ -1,0 +1,6 @@
+{
+  "name": "LineCard Studio",
+  "description": "Fast browser-native WebP to JPEG converter optimized for LINE Official Account Card-based messages, Rich Messages, and Coupons.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

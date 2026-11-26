@@ -14,6 +14,17 @@ import {
   getEffectiveSourceRect,
 } from './autoFraming';
 import { getProcessedBgRemovedCanvas } from './bgRemover';
+import {
+  MAX_IMAGE_FILE_BYTES,
+  MAX_SOURCE_DIMENSION,
+  computeLogoAnimationTransform,
+  decodeAnimatedGifFrames,
+  drawLogoSpriteWithShimmer,
+  encodeAnimatedCompositeGif,
+  getGifCycleDurationMs,
+  getLogoDrawableForTime,
+  hasGifMagicHeader,
+} from './gifEngine';
 
 export function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
@@ -29,6 +40,8 @@ export function getFormatExtension(format: OutputFormat): string {
       return 'png';
     case 'webp':
       return 'webp';
+    case 'gif':
+      return 'gif';
     case 'jpeg':
     default:
       return 'jpg';
@@ -41,6 +54,8 @@ export function getFormatMime(format: OutputFormat): string {
       return 'image/png';
     case 'webp':
       return 'image/webp';
+    case 'gif':
+      return 'image/gif';
     case 'jpeg':
     default:
       return 'image/jpeg';
@@ -53,6 +68,8 @@ export function getFormatLabel(format: OutputFormat): string {
       return 'PNG';
     case 'webp':
       return 'WebP';
+    case 'gif':
+      return 'GIF';
     case 'jpeg':
     default:
       return 'JPEG';
@@ -65,6 +82,8 @@ export function getFormatShortLabel(format: OutputFormat): string {
       return 'PNG';
     case 'webp':
       return 'WEBP';
+    case 'gif':
+      return 'GIF';
     case 'jpeg':
     default:
       return 'JPG';
@@ -104,12 +123,26 @@ export function buildOutputFilename(
   return `${safeBase}_${preset.filenameSuffix}.${ext}`;
 }
 
+export function buildStandaloneLogoGifFilename(originalName: string): string {
+  const base = originalName
+    .replace(/\.[^/.]+$/, '')
+    .trim()
+    .replace(/[^a-zA-Z0-9-_]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
+    .toLowerCase();
+  const safeBase = base || 'watermark-logo';
+  return `${safeBase}_watermark.gif`;
+}
+
 export function supportsAlphaExport(
   framing: FramingState,
   source?: SourceAsset | null
 ): boolean {
   const formatSupportsAlpha =
-    framing.outputFormat === 'png' || framing.outputFormat === 'webp';
+    framing.outputFormat === 'png' ||
+    framing.outputFormat === 'webp' ||
+    framing.outputFormat === 'gif';
   if (!formatSupportsAlpha || !framing.preserveTransparency) return false;
   if (framing.fitMode === 'crop') {
     return framing.bgRemoval.enabled ? true : source ? source.hasTransparency : true;
@@ -291,6 +324,11 @@ export async function loadImageFromUrl(url: string): Promise<HTMLImageElement> {
 }
 
 export async function loadSourceFile(file: File): Promise<SourceAsset> {
+  if (file.size > MAX_IMAGE_FILE_BYTES) {
+    throw new Error(
+      `File "${file.name}" exceeds the 50 MB browser processing limit.`
+    );
+  }
   if (
     !file.type.startsWith('image/') &&
     !/\.(webp|png|jpe?g|avif|gif|svg|bmp|ico|tiff?)$/i.test(file.name)
@@ -305,6 +343,16 @@ export async function loadSourceFile(file: File): Promise<SourceAsset> {
     const image = await loadImageFromUrl(objectUrl);
     const naturalWidth = image.naturalWidth || 1080;
     const naturalHeight = image.naturalHeight || 1080;
+    if (
+      naturalWidth <= 0 ||
+      naturalHeight <= 0 ||
+      naturalWidth > MAX_SOURCE_DIMENSION ||
+      naturalHeight > MAX_SOURCE_DIMENSION
+    ) {
+      throw new Error(
+        `Image dimensions (${naturalWidth}×${naturalHeight}) exceed the safe 16,384 px limit.`
+      );
+    }
     const edgeColor = extractDominantEdgeColor(image);
     const { hasTransparency, transparencyPercent } = analyzeSourceTransparency(
       image,
@@ -478,6 +526,11 @@ function applySubtleSharpen(
 }
 
 export async function loadWatermarkLogoFile(file: File): Promise<LogoWatermarkAsset> {
+  if (file.size > MAX_IMAGE_FILE_BYTES) {
+    throw new Error(
+      `Logo file "${file.name}" exceeds the 50 MB browser processing limit.`
+    );
+  }
   if (
     !file.type.startsWith('image/') &&
     !/\.(webp|png|jpe?g|avif|gif|svg|bmp|ico|tiff?)$/i.test(file.name)
@@ -485,11 +538,39 @@ export async function loadWatermarkLogoFile(file: File): Promise<LogoWatermarkAs
     throw new Error(`Unsupported logo file "${file.name}".`);
   }
 
+  const isGifCandidate =
+    file.type.toLowerCase() === 'image/gif' || /\.gif$/i.test(file.name);
+  let gifFrames: LogoWatermarkAsset['gifFrames'];
+  if (isGifCandidate) {
+    try {
+      const buffer = await file.arrayBuffer();
+      if (hasGifMagicHeader(new Uint8Array(buffer))) {
+        const decoded = await decodeAnimatedGifFrames(buffer);
+        if (decoded.length > 1) {
+          gifFrames = decoded;
+        }
+      }
+    } catch {
+      // Fallback to first-frame static image load if animated frames fail
+      gifFrames = undefined;
+    }
+  }
+
   const objectUrl = URL.createObjectURL(file);
   try {
     const image = await loadImageFromUrl(objectUrl);
     const naturalWidth = image.naturalWidth || 512;
     const naturalHeight = image.naturalHeight || 512;
+    if (
+      naturalWidth <= 0 ||
+      naturalHeight <= 0 ||
+      naturalWidth > MAX_SOURCE_DIMENSION ||
+      naturalHeight > MAX_SOURCE_DIMENSION
+    ) {
+      throw new Error(
+        `Logo dimensions (${naturalWidth}×${naturalHeight}) exceed the safe 16,384 px limit.`
+      );
+    }
     const edgeColor = extractDominantEdgeColor(image);
     return {
       image,
@@ -498,8 +579,16 @@ export async function loadWatermarkLogoFile(file: File): Promise<LogoWatermarkAs
       naturalWidth,
       naturalHeight,
       edgeColor,
+      isAnimatedGif: Boolean(gifFrames && gifFrames.length > 1),
+      gifFrames,
     };
   } catch (err) {
+    if (gifFrames) {
+      for (const frame of gifFrames) {
+        frame.canvas.width = 0;
+        frame.canvas.height = 0;
+      }
+    }
     URL.revokeObjectURL(objectUrl);
     throw err;
   }
@@ -532,14 +621,16 @@ function drawLogoWatermarkLayer(
   targetW: number,
   targetH: number,
   framing: FramingState,
-  logoAsset: LogoWatermarkAsset
+  logoAsset: LogoWatermarkAsset,
+  animTimeMs = 0
 ) {
   const { logoWatermark } = framing;
   if (!logoWatermark.enabled) return;
 
-  const drawable: CanvasImageSource = logoWatermark.bgRemoval.enabled
-    ? getProcessedBgRemovedCanvas(logoAsset.image, logoWatermark.bgRemoval, 1200)
-    : logoAsset.image;
+  const drawable = getLogoDrawableForTime(logoAsset, logoWatermark, animTimeMs, 1200);
+  const cycleMs = getGifCycleDurationMs(logoWatermark.gifSpeed);
+  const progress = cycleMs > 0 ? (animTimeMs % cycleMs) / cycleMs : 0;
+  const anim = computeLogoAnimationTransform(logoWatermark.gifMotion, progress);
 
   const srcW = Math.max(1, logoAsset.naturalWidth);
   const srcH = Math.max(1, logoAsset.naturalHeight);
@@ -550,27 +641,29 @@ function drawLogoWatermarkLayer(
   const drawW = Math.max(8, srcW * scale);
   const drawH = Math.max(8, srcH * scale);
   const marginPx = minDim * (logoWatermark.marginPercent / 100);
-  const rad = (logoWatermark.rotation * Math.PI) / 180;
+  const baseRad = (logoWatermark.rotation * Math.PI) / 180;
+  const animRad = (anim.rotateDeg * Math.PI) / 180;
 
   ctx.save();
-  ctx.globalAlpha = Math.max(0.05, Math.min(1, logoWatermark.opacity));
+  ctx.globalAlpha = Math.max(0.05, Math.min(1, logoWatermark.opacity * anim.alphaMul));
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = 'high';
 
   if (logoWatermark.position === 'tile') {
     const stepX = Math.max(drawW * 1.85, targetW / 3.2);
     const stepY = Math.max(drawH * 1.85, targetH / 3.2);
-    const tileRad = rad === 0 ? (-18 * Math.PI) / 180 : rad;
+    const tileRad = (baseRad === 0 ? (-18 * Math.PI) / 180 : baseRad) + animRad;
 
     for (let row = -1; row <= Math.ceil(targetH / stepY) + 1; row += 1) {
       const stagger = row % 2 === 0 ? 0 : stepX * 0.5;
       for (let col = -1; col <= Math.ceil(targetW / stepX) + 1; col += 1) {
-        const cx = col * stepX + stagger;
-        const cy = row * stepY;
+        const cx = col * stepX + stagger + anim.offsetXFrac * drawW;
+        const cy = row * stepY + anim.offsetYFrac * drawH;
         ctx.save();
         ctx.translate(cx, cy);
         ctx.rotate(tileRad);
-        ctx.drawImage(drawable, -drawW / 2, -drawH / 2, drawW, drawH);
+        ctx.scale(anim.scaleX, anim.scaleY);
+        drawLogoSpriteWithShimmer(ctx, drawable, drawW, drawH, anim.shimmerProgress);
         ctx.restore();
       }
     }
@@ -583,9 +676,10 @@ function drawLogoWatermarkLayer(
       drawH,
       marginPx
     );
-    ctx.translate(cx, cy);
-    ctx.rotate(rad);
-    ctx.drawImage(drawable, -drawW / 2, -drawH / 2, drawW, drawH);
+    ctx.translate(cx + anim.offsetXFrac * drawW, cy + anim.offsetYFrac * drawH);
+    ctx.rotate(baseRad + animRad);
+    ctx.scale(anim.scaleX, anim.scaleY);
+    drawLogoSpriteWithShimmer(ctx, drawable, drawW, drawH, anim.shimmerProgress);
   }
 
   ctx.restore();
@@ -723,18 +817,12 @@ function drawTextWatermarkLayer(
   ctx.restore();
 }
 
-/**
- * Renders the source image into a target canvas at exact dimensions with
- * optional background removal, interactive Crop & Fill or Fit & Pad,
- * watermark logo overlay (with optional logo BG removal), and text generator layer.
- */
-export function renderFramedCanvas(
+export function renderFramedBaseLayer(
   canvas: HTMLCanvasElement,
   source: SourceAsset,
   targetW: number,
   targetH: number,
-  framing: FramingState,
-  logoAsset?: LogoWatermarkAsset | null
+  framing: FramingState
 ): void {
   if (canvas.width !== targetW) canvas.width = targetW;
   if (canvas.height !== targetH) canvas.height = targetH;
@@ -747,7 +835,9 @@ export function renderFramedCanvas(
   ctx.clearRect(0, 0, targetW, targetH);
 
   const formatSupportsAlpha =
-    framing.outputFormat === 'png' || framing.outputFormat === 'webp';
+    framing.outputFormat === 'png' ||
+    framing.outputFormat === 'webp' ||
+    framing.outputFormat === 'gif';
   const keepAlpha = formatSupportsAlpha && framing.preserveTransparency;
   const matteHex = resolveMatteColor(source, framing);
 
@@ -893,9 +983,29 @@ export function renderFramedCanvas(
   if (framing.sharpen && targetW * targetH <= 16_800_000) {
     applySubtleSharpen(ctx, targetW, targetH, 0.22);
   }
+}
+
+/**
+ * Renders the source image into a target canvas at exact dimensions with
+ * optional background removal, interactive Crop & Fill or Fit & Pad,
+ * watermark logo overlay (static or animated GIF frame), and text generator layer.
+ */
+export function renderFramedCanvas(
+  canvas: HTMLCanvasElement,
+  source: SourceAsset,
+  targetW: number,
+  targetH: number,
+  framing: FramingState,
+  logoAsset?: LogoWatermarkAsset | null,
+  animTimeMs = 0
+): void {
+  renderFramedBaseLayer(canvas, source, targetW, targetH, framing);
+
+  const ctx = canvas.getContext('2d', { alpha: true });
+  if (!ctx) return;
 
   if (logoAsset && framing.logoWatermark.enabled) {
-    drawLogoWatermarkLayer(ctx, targetW, targetH, framing, logoAsset);
+    drawLogoWatermarkLayer(ctx, targetW, targetH, framing, logoAsset, animTimeMs);
   }
 
   if (framing.textWatermark.enabled && framing.textWatermark.text.trim()) {
@@ -944,8 +1054,51 @@ export async function encodeImageOutput(
   const targetW = preset.width * framing.scale;
   const targetH = preset.height * framing.scale;
 
+  const formatSupportsAlpha =
+    framing.outputFormat === 'png' ||
+    framing.outputFormat === 'webp' ||
+    framing.outputFormat === 'gif';
+  const keepAlpha = formatSupportsAlpha && framing.preserveTransparency;
+  const hasEffectiveAlpha = source.hasTransparency || framing.bgRemoval.enabled;
+  const alphaPreserved =
+    keepAlpha &&
+    (hasEffectiveAlpha ||
+      (framing.fitMode === 'pad' && framing.padBackdrop === 'transparent')) &&
+    (framing.fitMode === 'crop' || framing.padBackdrop === 'transparent');
+  const matteApplied = hasEffectiveAlpha && !keepAlpha;
+
+  if (framing.outputFormat === 'gif') {
+    const gifRes = await encodeAnimatedCompositeGif(
+      targetW,
+      targetH,
+      alphaPreserved,
+      logoAsset,
+      framing.logoWatermark,
+      (baseCanvas, w, h) => renderFramedBaseLayer(baseCanvas, source, w, h, framing),
+      (ctx, w, h, animTimeMs) => {
+        if (logoAsset && framing.logoWatermark.enabled) {
+          drawLogoWatermarkLayer(ctx, w, h, framing, logoAsset, animTimeMs);
+        }
+        if (framing.textWatermark.enabled && framing.textWatermark.text.trim()) {
+          drawTextWatermarkLayer(ctx, w, h, framing);
+        }
+      }
+    );
+
+    return {
+      blob: gifRes.blob,
+      width: gifRes.width,
+      height: gifRes.height,
+      format: 'gif',
+      mimeType: 'image/gif',
+      encodeTimeMs: gifRes.encodeTimeMs,
+      matteApplied,
+      alphaPreserved,
+    };
+  }
+
   const offscreen = document.createElement('canvas');
-  renderFramedCanvas(offscreen, source, targetW, targetH, framing, logoAsset);
+  renderFramedCanvas(offscreen, source, targetW, targetH, framing, logoAsset, 0);
 
   const mimeType = getFormatMime(framing.outputFormat);
   const formatLabel = getFormatLabel(framing.outputFormat);
@@ -989,17 +1142,6 @@ export async function encodeImageOutput(
       optimizedQuality = Math.round(bestQuality * 100);
     }
   }
-
-  const formatSupportsAlpha =
-    framing.outputFormat === 'png' || framing.outputFormat === 'webp';
-  const keepAlpha = formatSupportsAlpha && framing.preserveTransparency;
-  const hasEffectiveAlpha = source.hasTransparency || framing.bgRemoval.enabled;
-  const alphaPreserved =
-    keepAlpha &&
-    (hasEffectiveAlpha ||
-      (framing.fitMode === 'pad' && framing.padBackdrop === 'transparent')) &&
-    (framing.fitMode === 'crop' || framing.padBackdrop === 'transparent');
-  const matteApplied = hasEffectiveAlpha && !keepAlpha;
 
   const encodeTimeMs = Math.max(1, Math.round(performance.now() - startedAt));
   return {

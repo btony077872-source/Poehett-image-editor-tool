@@ -1,10 +1,16 @@
+import { ChangeEvent, useRef } from 'react';
 import {
   ArrowLeftRight,
   Crop,
+  Download,
+  Film,
   Grid3X3,
+  ImagePlus,
   Lock,
   RotateCcw,
   Sparkles,
+  Stamp,
+  Trash2,
   Unlock,
 } from 'lucide-react';
 import { LINE_PRESETS, PLATFORM_CATEGORIES } from '../data/presets';
@@ -13,7 +19,10 @@ import {
   FitMode,
   FramingState,
   LinePreset,
+  LogoGifMotion,
+  LogoGifSpeed,
   LogoWatermarkAsset,
+  LogoWatermarkState,
   MatteMode,
   OutputFormat,
   PadBackdrop,
@@ -29,6 +38,7 @@ import {
 } from '../utils/imageEngine';
 import { LayersPanel } from './LayersPanel';
 import { PlatformLogo } from './PlatformLogo';
+import { WatermarkAnchorPicker } from './WatermarkAnchorPicker';
 
 interface ControlRailProps {
   activePlatform: PlatformId;
@@ -52,7 +62,9 @@ interface ControlRailProps {
   onSelectLogoFile: (file: File) => void;
   onClearLogo: () => void;
   onUseMascotLogo: () => void;
-  section?: 'all' | 'presets' | 'fit' | 'layers' | 'quality';
+  onExportLogoGif: () => void;
+  isExportingLogoGif?: boolean;
+  section?: 'all' | 'presets' | 'fit' | 'layers' | 'watermark' | 'quality';
   embedded?: boolean;
 }
 
@@ -60,6 +72,7 @@ const OUTPUT_FORMATS: { id: OutputFormat; label: string }[] = [
   { id: 'jpeg', label: 'JPEG' },
   { id: 'png', label: 'PNG' },
   { id: 'webp', label: 'WebP' },
+  { id: 'gif', label: 'GIF' },
 ];
 
 const MATTE_SWATCHES = ['#FFFFFF', '#FAF6EE', '#F3EBDD', '#E4D7C3', '#2B1E16', '#C25E00'];
@@ -75,6 +88,21 @@ const CUSTOM_QUICK_RATIOS: { label: string; w: number; h: number }[] = [
   { label: '4:5', w: 1080, h: 1350 },
   { label: '16:9', w: 1920, h: 1080 },
   { label: '9:16', w: 1080, h: 1920 },
+];
+
+const WATERMARK_GIF_MOTIONS: { id: LogoGifMotion; label: string }[] = [
+  { id: 'pulse', label: 'Pulse' },
+  { id: 'float', label: 'Float' },
+  { id: 'wiggle', label: 'Wiggle' },
+  { id: 'spin', label: 'Spin' },
+  { id: 'orbit', label: 'Orbit' },
+  { id: 'shimmer', label: 'Shimmer' },
+];
+
+const WATERMARK_GIF_SPEEDS: { id: LogoGifSpeed; label: string }[] = [
+  { id: 'slow', label: 'Slow' },
+  { id: 'normal', label: 'Normal' },
+  { id: 'fast', label: 'Fast' },
 ];
 
 export function ControlRail({
@@ -99,16 +127,21 @@ export function ControlRail({
   onSelectLogoFile,
   onClearLogo,
   onUseMascotLogo,
+  onExportLogoGif,
+  isExportingLogoGif = false,
   section = 'all',
   embedded = false,
 }: ControlRailProps) {
+  const watermarkInputRef = useRef<HTMLInputElement | null>(null);
   const qualityValue = Math.max(1, Math.min(100, Math.round(framing.quality * 100)));
   const zoomPercent = Math.round(framing.zoom * 100);
   const outputWidth = activePreset.width * framing.scale;
   const outputHeight = activePreset.height * framing.scale;
 
   const formatSupportsAlpha =
-    framing.outputFormat === 'png' || framing.outputFormat === 'webp';
+    framing.outputFormat === 'png' ||
+    framing.outputFormat === 'webp' ||
+    framing.outputFormat === 'gif';
   const formatLabel = getFormatLabel(framing.outputFormat);
   const resolvedMatteHex = resolveMatteColor(source, framing);
   const recommendation = source ? recommendOutputFormat(source) : null;
@@ -170,9 +203,24 @@ export function ControlRail({
     }
   };
 
+  const updateLogoWatermark = (patch: Partial<LogoWatermarkState>) => {
+    onUpdateFraming({
+      logoWatermark: { ...framing.logoWatermark, ...patch },
+    });
+  };
+
+  const handleWatermarkFileChange = (e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      onSelectLogoFile(file);
+    }
+    e.target.value = '';
+  };
+
   const showPresets = section === 'all' || section === 'presets';
   const showFit = section === 'all' || section === 'fit';
   const showLayers = section === 'all' || section === 'layers';
+  const showWatermark = section === 'all' || section === 'watermark';
   const showQuality = section === 'all' || section === 'quality';
 
   const idPrefix = embedded ? 'mobile-' : '';
@@ -734,10 +782,377 @@ export function ControlRail({
             onSelectLogoFile={onSelectLogoFile}
             onClearLogo={onClearLogo}
             onUseMascotLogo={onUseMascotLogo}
+            onExportLogoGif={onExportLogoGif}
+            isExportingLogoGif={isExportingLogoGif}
           />
         )}
 
-        {/* Section 4: Output Format, Quality & Scale */}
+        {/* Section 4: Dedicated GIF Watermark Controls */}
+        {showWatermark && (
+          <section
+            aria-label="Watermark"
+            className={embedded ? 'p-4' : 'p-5'}
+          >
+            <input
+              ref={watermarkInputRef}
+              id={`${idPrefix}rail-watermark-file`}
+              type="file"
+              accept="image/*,.webp,.png,.jpg,.jpeg,.svg,.gif,.avif,.bmp,.ico"
+              onChange={handleWatermarkFileChange}
+              className="hidden"
+            />
+
+            <div className="mb-3 flex items-baseline justify-between gap-2">
+              <h2 className="flex items-center gap-1.5 font-display text-sm font-semibold text-[#2B1E16]">
+                <Stamp className="h-3.5 w-3.5 shrink-0 text-[#C25E00]" aria-hidden="true" />
+                <span>Watermark</span>
+              </h2>
+              <span className="font-mono text-xs tabular-nums text-[#6E5849] whitespace-nowrap">
+                {!logoAsset
+                  ? 'GIF Ready'
+                  : framing.logoWatermark.enabled
+                  ? framing.logoWatermark.gifMotion !== 'none'
+                    ? `${framing.logoWatermark.gifMotion === 'gif-frames' ? 'GIF Frames' : framing.logoWatermark.gifMotion} · ${Math.round(framing.logoWatermark.opacity * 100)}%`
+                    : `${Math.round(framing.logoWatermark.opacity * 100)}% · ${framing.logoWatermark.sizePercent}%`
+                  : 'Hidden'}
+              </span>
+            </div>
+
+            {!logoAsset ? (
+              <div className="space-y-2">
+                <button
+                  type="button"
+                  onClick={() => watermarkInputRef.current?.click()}
+                  className="flex min-h-[44px] w-full items-center justify-center gap-2 rounded-lg border border-dashed border-[#CBB89D] bg-[#FAF6EE] px-3 py-2.5 text-xs font-semibold text-[#2B1E16] transition-colors hover:border-[#C25E00] hover:bg-[#D97706]/[0.06] whitespace-nowrap"
+                >
+                  <ImagePlus className="h-4 w-4 shrink-0 text-[#C25E00]" aria-hidden="true" />
+                  <span>Upload Logo or GIF</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={onUseMascotLogo}
+                  className="min-h-[40px] w-full rounded-lg border border-[#E4D7C3] bg-[#FFFDF8] px-3 py-1.5 text-xs font-medium text-[#6E5849] transition-colors hover:border-[#D97706] hover:text-[#2B1E16] lg:min-h-0 whitespace-nowrap"
+                >
+                  Try Cowboy Roach Mascot
+                </button>
+              </div>
+            ) : (
+              <div className="space-y-3.5">
+                {/* Active Logo Asset Strip */}
+                <div className="flex items-center justify-between gap-2 rounded-lg border border-[#E4D7C3] bg-[#FAF6EE] p-2">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <div
+                      className="h-9 w-9 shrink-0 overflow-hidden rounded-md border border-[#E4D7C3]"
+                      style={{
+                        backgroundColor: '#FFFDF8',
+                        backgroundImage:
+                          'linear-gradient(45deg, #E4D7C3 25%, transparent 25%), linear-gradient(-45deg, #E4D7C3 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #E4D7C3 75%), linear-gradient(-45deg, transparent 75%, #E4D7C3 75%)',
+                        backgroundSize: '10px 10px',
+                        backgroundPosition: '0 0, 0 5px, 5px -5px, -5px 0px',
+                      }}
+                    >
+                      <img
+                        src={logoAsset.objectUrl}
+                        alt={logoAsset.fileName}
+                        referrerPolicy="no-referrer"
+                        className="h-full w-full object-contain"
+                      />
+                    </div>
+                    <div className="min-w-0">
+                      <p className="truncate text-xs font-semibold text-[#2B1E16]">
+                        {logoAsset.fileName}
+                      </p>
+                      <p className="font-mono text-[10px] tabular-nums text-[#6E5849]">
+                        {logoAsset.naturalWidth}×{logoAsset.naturalHeight}
+                        {logoAsset.isAnimatedGif
+                          ? ` · ${logoAsset.gifFrames?.length ?? 0} frames`
+                          : ''}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={() => watermarkInputRef.current?.click()}
+                      className="rounded-md border border-[#E4D7C3] bg-[#FFFDF8] px-2 py-1 text-[11px] font-medium text-[#4A3628] transition-colors hover:border-[#C25E00] whitespace-nowrap"
+                    >
+                      Change
+                    </button>
+                    <button
+                      type="button"
+                      onClick={onClearLogo}
+                      aria-label="Clear watermark logo"
+                      className="rounded-md border border-[#E4D7C3] bg-[#FFFDF8] p-1 text-[#6E5849] transition-colors hover:border-[#FCA5A5] hover:text-[#DC2626]"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
+                    </button>
+                  </div>
+                </div>
+
+                {/* Visibility & GIF Animation Switches */}
+                <div className="space-y-2.5">
+                  <div className="flex items-center justify-between gap-3">
+                    <label
+                      htmlFor={`${idPrefix}rail-watermark-enabled`}
+                      className="text-xs font-medium text-[#4A3628]"
+                    >
+                      Show Watermark
+                    </label>
+                    <button
+                      id={`${idPrefix}rail-watermark-enabled`}
+                      type="button"
+                      role="switch"
+                      aria-checked={framing.logoWatermark.enabled}
+                      onClick={() =>
+                        updateLogoWatermark({ enabled: !framing.logoWatermark.enabled })
+                      }
+                      className={`relative inline-flex h-7 w-12 shrink-0 items-center rounded-full transition-colors duration-150 lg:h-6 lg:w-11 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#C25E00] ${
+                        framing.logoWatermark.enabled ? 'bg-[#C25E00]' : 'bg-[#D8C7AE]'
+                      }`}
+                    >
+                      <span
+                        aria-hidden="true"
+                        className={`inline-block h-5 w-5 transform rounded-full bg-white shadow-xs transition-transform duration-150 lg:h-4.5 lg:w-4.5 ${
+                          framing.logoWatermark.enabled
+                            ? 'translate-x-6 lg:translate-x-5.5'
+                            : 'translate-x-1 lg:translate-x-0.5'
+                        }`}
+                      />
+                    </button>
+                  </div>
+
+                  <div className="flex items-center justify-between gap-3">
+                    <label
+                      htmlFor={`${idPrefix}rail-watermark-gif-toggle`}
+                      className="flex items-center gap-1.5 text-xs font-medium text-[#4A3628]"
+                    >
+                      <Film className="h-3.5 w-3.5 shrink-0 text-[#C25E00]" aria-hidden="true" />
+                      <span>Animated GIF Loop</span>
+                    </label>
+                    <button
+                      id={`${idPrefix}rail-watermark-gif-toggle`}
+                      type="button"
+                      role="switch"
+                      aria-checked={framing.logoWatermark.gifMotion !== 'none'}
+                      onClick={() => {
+                        const isAnimated = framing.logoWatermark.gifMotion !== 'none';
+                        updateLogoWatermark({
+                          enabled: isAnimated ? framing.logoWatermark.enabled : true,
+                          gifMotion: isAnimated
+                            ? 'none'
+                            : logoAsset.isAnimatedGif
+                            ? 'gif-frames'
+                            : 'pulse',
+                        });
+                      }}
+                      className={`relative inline-flex h-7 w-12 shrink-0 items-center rounded-full transition-colors duration-150 lg:h-6 lg:w-11 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#C25E00] ${
+                        framing.logoWatermark.gifMotion !== 'none'
+                          ? 'bg-[#C25E00]'
+                          : 'bg-[#D8C7AE]'
+                      }`}
+                    >
+                      <span
+                        aria-hidden="true"
+                        className={`inline-block h-5 w-5 transform rounded-full bg-white shadow-xs transition-transform duration-150 lg:h-4.5 lg:w-4.5 ${
+                          framing.logoWatermark.gifMotion !== 'none'
+                            ? 'translate-x-6 lg:translate-x-5.5'
+                            : 'translate-x-1 lg:translate-x-0.5'
+                        }`}
+                      />
+                    </button>
+                  </div>
+                </div>
+
+                {/* Scaling & Opacity Sliders */}
+                <div className="space-y-3 border-t border-[#E4D7C3] pt-3">
+                  <div>
+                    <div className="mb-1.5 flex items-center justify-between text-xs">
+                      <label
+                        htmlFor={`${idPrefix}rail-watermark-scale`}
+                        className="font-medium text-[#4A3628]"
+                      >
+                        Watermark Scale
+                      </label>
+                      <span className="font-mono tabular-nums text-[#6E5849]">
+                        {framing.logoWatermark.sizePercent}%
+                      </span>
+                    </div>
+                    <input
+                      id={`${idPrefix}rail-watermark-scale`}
+                      type="range"
+                      min={6}
+                      max={65}
+                      step={1}
+                      value={framing.logoWatermark.sizePercent}
+                      onChange={(e) =>
+                        updateLogoWatermark({
+                          enabled: true,
+                          sizePercent: parseInt(e.target.value, 10),
+                        })
+                      }
+                      className="studio-slider w-full"
+                    />
+                  </div>
+
+                  <div>
+                    <div className="mb-1.5 flex items-center justify-between text-xs">
+                      <label
+                        htmlFor={`${idPrefix}rail-watermark-opacity`}
+                        className="font-medium text-[#4A3628]"
+                      >
+                        Watermark Opacity
+                      </label>
+                      <span className="font-mono tabular-nums text-[#6E5849]">
+                        {Math.round(framing.logoWatermark.opacity * 100)}%
+                      </span>
+                    </div>
+                    <input
+                      id={`${idPrefix}rail-watermark-opacity`}
+                      type="range"
+                      min={10}
+                      max={100}
+                      step={2}
+                      value={Math.round(framing.logoWatermark.opacity * 100)}
+                      onChange={(e) =>
+                        updateLogoWatermark({
+                          enabled: true,
+                          opacity: parseInt(e.target.value, 10) / 100,
+                        })
+                      }
+                      className="studio-slider w-full"
+                    />
+                  </div>
+                </div>
+
+                {/* Position (Anchoring) Picker */}
+                <WatermarkAnchorPicker
+                  label="Position (Anchor)"
+                  value={framing.logoWatermark.position}
+                  onChange={(position) =>
+                    updateLogoWatermark({ enabled: true, position })
+                  }
+                />
+
+                {/* GIF Motion Style & Loop Speed when Animated */}
+                {framing.logoWatermark.gifMotion !== 'none' && (
+                  <div className="space-y-2.5 border-t border-[#E4D7C3] pt-3">
+                    <div>
+                      <p className="mb-1 text-[11px] font-medium text-[#4A3628]">
+                        GIF Motion Style
+                      </p>
+                      <div className="grid grid-cols-3 gap-1">
+                        {logoAsset.isAnimatedGif && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              updateLogoWatermark({
+                                enabled: true,
+                                gifMotion: 'gif-frames',
+                              })
+                            }
+                            className={`col-span-3 rounded-md border px-2 py-1 text-[11px] font-medium transition-colors whitespace-nowrap ${
+                              framing.logoWatermark.gifMotion === 'gif-frames'
+                                ? 'border-[#D97706] bg-[#D97706]/12 text-[#2B1E16]'
+                                : 'border-[#E4D7C3] bg-[#FFFDF8] text-[#6E5849] hover:border-[#C25E00]'
+                            }`}
+                          >
+                            Original GIF Frames ({logoAsset.gifFrames?.length ?? 0})
+                          </button>
+                        )}
+                        {WATERMARK_GIF_MOTIONS.map((opt) => {
+                          const active = framing.logoWatermark.gifMotion === opt.id;
+                          return (
+                            <button
+                              key={opt.id}
+                              type="button"
+                              onClick={() =>
+                                updateLogoWatermark({
+                                  enabled: true,
+                                  gifMotion: opt.id,
+                                })
+                              }
+                              className={`rounded-md border px-2 py-1 text-[11px] font-medium transition-colors whitespace-nowrap ${
+                                active
+                                  ? 'border-[#D97706] bg-[#D97706]/12 text-[#2B1E16]'
+                                  : 'border-[#E4D7C3] bg-[#FFFDF8] text-[#6E5849] hover:border-[#C25E00] hover:text-[#2B1E16]'
+                              }`}
+                            >
+                              {opt.label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    <div>
+                      <p className="mb-1 text-[11px] font-medium text-[#4A3628]">
+                        Loop Speed
+                      </p>
+                      <div className="grid grid-cols-3 gap-1 rounded-lg bg-[#F3EBDD] p-1">
+                        {WATERMARK_GIF_SPEEDS.map((sp) => {
+                          const active = framing.logoWatermark.gifSpeed === sp.id;
+                          return (
+                            <button
+                              key={sp.id}
+                              type="button"
+                              onClick={() =>
+                                updateLogoWatermark({
+                                  enabled: true,
+                                  gifSpeed: sp.id,
+                                })
+                              }
+                              className={`rounded py-1 text-[11px] font-medium transition-colors whitespace-nowrap ${
+                                active
+                                  ? 'bg-[#FFFDF8] text-[#2B1E16] shadow-xs'
+                                  : 'text-[#6E5849] hover:text-[#2B1E16]'
+                              }`}
+                            >
+                              {sp.label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Direct GIF Export & Output Format Shortcuts */}
+                <div className="flex flex-col gap-1.5 pt-0.5">
+                  <button
+                    type="button"
+                    disabled={isExportingLogoGif}
+                    onClick={onExportLogoGif}
+                    className="inline-flex min-h-[36px] w-full items-center justify-center gap-1.5 rounded-lg border border-[#CBB89D] bg-[#FAF6EE] px-3 py-1.5 text-xs font-semibold text-[#2B1E16] transition-colors hover:border-[#C25E00] hover:text-[#C25E00] disabled:opacity-55 whitespace-nowrap"
+                  >
+                    <Download className="h-3.5 w-3.5 shrink-0 text-[#C25E00]" aria-hidden="true" />
+                    <span>
+                      {isExportingLogoGif
+                        ? 'Creating Logo GIF…'
+                        : framing.logoWatermark.gifMotion !== 'none'
+                        ? 'Save Logo as GIF'
+                        : 'Convert Logo to GIF'}
+                    </span>
+                  </button>
+
+                  {source &&
+                    framing.logoWatermark.gifMotion !== 'none' &&
+                    framing.outputFormat !== 'gif' && (
+                      <button
+                        type="button"
+                        onClick={() => onUpdateFraming({ outputFormat: 'gif' })}
+                        className="inline-flex min-h-[36px] w-full items-center justify-center gap-1.5 rounded-lg bg-[#C25E00] px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-[#A14B00] whitespace-nowrap"
+                      >
+                        <Film className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                        <span>Switch Output to GIF</span>
+                      </button>
+                    )}
+                </div>
+              </div>
+            )}
+          </section>
+        )}
+
+        {/* Section 5: Output Format, Quality & Scale */}
         {showQuality && (
           <section className={embedded ? 'p-4' : 'p-5'}>
             <div className="mb-3 flex items-baseline justify-between gap-2">
@@ -793,7 +1208,7 @@ export function ControlRail({
                 </div>
               )}
 
-              {/* Output Format Selector: JPEG / PNG / WebP */}
+              {/* Output Format Selector: JPEG / PNG / WebP / GIF */}
               <div>
                 <p className="mb-1.5 text-xs font-medium text-[#4A3628]">
                   Target Format
@@ -801,7 +1216,7 @@ export function ControlRail({
                 <div
                   role="group"
                   aria-label="Output image format"
-                  className="grid grid-cols-3 gap-1 rounded-lg bg-[#F3EBDD] p-1"
+                  className="grid grid-cols-4 gap-1 rounded-lg bg-[#F3EBDD] p-1"
                 >
                   {OUTPUT_FORMATS.map((fmt) => {
                     const active = framing.outputFormat === fmt.id;
@@ -843,10 +1258,14 @@ export function ControlRail({
                 </div>
               </div>
 
-              {/* Compression Slider (JPEG & WebP) vs Lossless Info (PNG) */}
+              {/* Compression Slider (JPEG & WebP) vs Lossless Info (PNG) vs Animated Loop Info (GIF) */}
               {framing.outputFormat === 'png' ? (
                 <div className="rounded-lg border border-[#E4D7C3] bg-[#FAF6EE] px-3 py-2.5 text-xs text-[#6E5849]">
                   Lossless PNG export — full pixel clarity with zero compression artifacts.
+                </div>
+              ) : framing.outputFormat === 'gif' ? (
+                <div className="rounded-lg border border-[#E4D7C3] bg-[#FAF6EE] px-3 py-2.5 text-xs text-[#6E5849]">
+                  Looping GIF export (max 720px longest side) — animates your Watermark Logo motion and transparent cutouts.
                 </div>
               ) : (
                 <div>
@@ -1173,7 +1592,9 @@ export function ControlRail({
                 </p>
               )}
 
-              {framing.outputFormat !== 'png' && qualityValue < 40 && (
+              {framing.outputFormat !== 'png' &&
+                framing.outputFormat !== 'gif' &&
+                qualityValue < 40 && (
                 <p className="text-[11px] leading-snug text-[#D97706]">
                   Heavy compression below 40 may soften product details.
                 </p>

@@ -7,7 +7,7 @@ export type PlatformId =
   | 'x'
   | 'custom';
 
-export type OutputFormat = 'jpeg' | 'png' | 'webp';
+export type OutputFormat = 'jpeg' | 'png' | 'webp' | 'gif';
 
 export type PresetGroup = 'Card-based' | 'Rich Message' | 'Coupon' | string;
 
@@ -83,6 +83,23 @@ export type WatermarkAnchor =
   | 'bottom-right'
   | 'tile';
 
+export type LogoGifMotion =
+  | 'none'
+  | 'pulse'
+  | 'float'
+  | 'wiggle'
+  | 'spin'
+  | 'orbit'
+  | 'shimmer'
+  | 'gif-frames';
+
+export type LogoGifSpeed = 'slow' | 'normal' | 'fast';
+
+export interface LogoGifFrame {
+  canvas: HTMLCanvasElement;
+  delayMs: number;
+}
+
 export interface LogoWatermarkAsset {
   image: HTMLImageElement;
   objectUrl: string;
@@ -90,6 +107,8 @@ export interface LogoWatermarkAsset {
   naturalWidth: number;
   naturalHeight: number;
   edgeColor: string;
+  isAnimatedGif?: boolean;
+  gifFrames?: LogoGifFrame[];
 }
 
 export interface LogoWatermarkState {
@@ -100,6 +119,9 @@ export interface LogoWatermarkState {
   marginPercent: number; // 0 to 15
   rotation: number; // -45 to 45
   bgRemoval: BgRemovalConfig;
+  gifMotion: LogoGifMotion;
+  gifSpeed: LogoGifSpeed;
+  gifFps: number; // 6 to 20
 }
 
 export type TextFontStyle = 'display' | 'sans' | 'mono' | 'serif';

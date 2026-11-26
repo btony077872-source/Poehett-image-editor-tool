@@ -32,6 +32,7 @@ import {
 } from './types';
 import {
   buildOutputFilename,
+  buildStandaloneLogoGifFilename,
   encodeImageOutput,
   formatBytes,
   getFormatLabel,
@@ -47,6 +48,7 @@ import {
   detectClosestPresetMatch,
   getEffectiveSourceRect,
 } from './utils/autoFraming';
+import { encodeStandaloneLogoGif } from './utils/gifEngine';
 import { buildBatchZipArchive } from './utils/zipExporter';
 
 const EMPTY_OUTPUT: EncodedOutput = {
@@ -71,6 +73,17 @@ const IDLE_ZIP_STATE: ZipExportState = {
 
 function createBatchId(): string {
   return `img_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+}
+
+function releaseLogoAsset(asset: LogoWatermarkAsset | null) {
+  if (!asset) return;
+  URL.revokeObjectURL(asset.objectUrl);
+  if (asset.gifFrames) {
+    for (const frame of asset.gifFrames) {
+      frame.canvas.width = 0;
+      frame.canvas.height = 0;
+    }
+  }
 }
 
 function makeBatchItem(asset: SourceAsset): BatchItem {
@@ -155,6 +168,7 @@ export default function App() {
 
   const [isDraggingFile, setIsDraggingFile] = useState(false);
   const [isLoadingSampleId, setIsLoadingSampleId] = useState<string | null>(null);
+  const [isExportingLogoGif, setIsExportingLogoGif] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
@@ -235,13 +249,13 @@ export default function App() {
     }, 3400);
   }, []);
 
-  // Clean up all object URLs on unmount
+  // Clean up all object URLs and offscreen GIF frame buffers on unmount
   useEffect(() => {
     return () => {
       for (const item of queueRef.current) {
         URL.revokeObjectURL(item.asset.objectUrl);
       }
-      if (logoAssetRef.current) URL.revokeObjectURL(logoAssetRef.current.objectUrl);
+      releaseLogoAsset(logoAssetRef.current);
       if (outputUrlRef.current) URL.revokeObjectURL(outputUrlRef.current);
       if (toastTimeoutRef.current !== null) window.clearTimeout(toastTimeoutRef.current);
     };
@@ -448,7 +462,7 @@ export default function App() {
       try {
         const loaded = await loadWatermarkLogoFile(file);
         setLogoAsset((prev) => {
-          if (prev) URL.revokeObjectURL(prev.objectUrl);
+          releaseLogoAsset(prev);
           return loaded;
         });
         setFraming((prev) => ({
@@ -456,9 +470,18 @@ export default function App() {
           logoWatermark: {
             ...prev.logoWatermark,
             enabled: true,
+            gifMotion: loaded.isAnimatedGif
+              ? 'gif-frames'
+              : prev.logoWatermark.gifMotion === 'gif-frames'
+              ? 'pulse'
+              : prev.logoWatermark.gifMotion,
           },
         }));
-        showToast(`Loaded watermark logo: ${loaded.fileName}`);
+        showToast(
+          loaded.isAnimatedGif
+            ? `Loaded ${loaded.gifFrames?.length ?? 0}-frame animated GIF watermark`
+            : `Loaded watermark logo: ${loaded.fileName}`
+        );
       } catch (err) {
         setErrorMessage(
           err instanceof Error ? err.message : 'Unable to load watermark logo image.'
@@ -470,7 +493,7 @@ export default function App() {
 
   const handleClearLogo = useCallback(() => {
     setLogoAsset((prev) => {
-      if (prev) URL.revokeObjectURL(prev.objectUrl);
+      releaseLogoAsset(prev);
       return null;
     });
     setFraming((prev) => ({
@@ -495,7 +518,7 @@ export default function App() {
       });
       const loaded = await loadWatermarkLogoFile(mascotFile);
       setLogoAsset((prev) => {
-        if (prev) URL.revokeObjectURL(prev.objectUrl);
+        releaseLogoAsset(prev);
         return loaded;
       });
       setFraming((prev) => ({
@@ -503,6 +526,10 @@ export default function App() {
         logoWatermark: {
           ...prev.logoWatermark,
           enabled: true,
+          gifMotion:
+            prev.logoWatermark.gifMotion === 'gif-frames'
+              ? 'pulse'
+              : prev.logoWatermark.gifMotion,
         },
       }));
       showToast('Cowboy Roach watermark logo ready');
@@ -512,6 +539,33 @@ export default function App() {
       );
     }
   }, [showToast]);
+
+  const handleExportLogoGif = useCallback(async () => {
+    if (!logoAsset || isExportingLogoGif) return;
+    setErrorMessage(null);
+    setIsExportingLogoGif(true);
+    try {
+      const res = await encodeStandaloneLogoGif(logoAsset, framing.logoWatermark);
+      const filename = buildStandaloneLogoGifFilename(logoAsset.fileName);
+      const url = URL.createObjectURL(res.blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      window.setTimeout(() => URL.revokeObjectURL(url), 5000);
+      showToast(
+        `Saved ${filename} (${res.frameCount} frames · ${formatBytes(res.blob.size)})`
+      );
+    } catch (err) {
+      setErrorMessage(
+        err instanceof Error ? err.message : 'Failed to convert logo into GIF.'
+      );
+    } finally {
+      setIsExportingLogoGif(false);
+    }
+  }, [logoAsset, isExportingLogoGif, framing.logoWatermark, showToast]);
 
   const handleUpdateFraming = useCallback(
     (patch: Partial<FramingState>) => {
@@ -1071,6 +1125,8 @@ export default function App() {
                 onSelectLogoFile={handleSelectLogoFile}
                 onClearLogo={handleClearLogo}
                 onUseMascotLogo={handleUseMascotLogo}
+                onExportLogoGif={handleExportLogoGif}
+                isExportingLogoGif={isExportingLogoGif}
               />
             </div>
 
@@ -1122,7 +1178,7 @@ export default function App() {
                   </span>
                   <span className="font-mono text-[11px] tabular-nums text-[#6E5849] whitespace-nowrap">
                     {activePreset.ratioLabel} · {getFormatLabel(framing.outputFormat)}
-                    {framing.outputFormat !== 'png'
+                    {framing.outputFormat !== 'png' && framing.outputFormat !== 'gif'
                       ? ` Q${Math.round(framing.quality * 100)}`
                       : ''}
                   </span>
@@ -1169,6 +1225,8 @@ export default function App() {
                       onSelectLogoFile={handleSelectLogoFile}
                       onClearLogo={handleClearLogo}
                       onUseMascotLogo={handleUseMascotLogo}
+                      onExportLogoGif={handleExportLogoGif}
+                      isExportingLogoGif={isExportingLogoGif}
                       section={mobileTab}
                       embedded
                     />

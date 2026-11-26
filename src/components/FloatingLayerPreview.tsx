@@ -38,8 +38,45 @@ export function FloatingLayerPreview({
       h = maxDim;
       w = Math.round(maxDim * aspect);
     }
+    const targetW = Math.max(32, w);
+    const targetH = Math.max(32, h);
 
-    renderFramedCanvas(canvas, source, Math.max(32, w), Math.max(32, h), framing, logoAsset);
+    renderFramedCanvas(canvas, source, targetW, targetH, framing, logoAsset, 0);
+
+    const hasAnimatedLogo =
+      Boolean(logoAsset) &&
+      framing.logoWatermark.enabled &&
+      (framing.logoWatermark.gifMotion !== 'none' || Boolean(logoAsset?.isAnimatedGif));
+
+    const reduced =
+      typeof window !== 'undefined' &&
+      typeof window.matchMedia === 'function' &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+    if (!hasAnimatedLogo || reduced) return;
+
+    let rafId = 0;
+    const startTs = performance.now();
+    let lastDrawTs = 0;
+
+    const tick = (now: number) => {
+      if (now - lastDrawTs >= 50) {
+        lastDrawTs = now;
+        renderFramedCanvas(
+          canvas,
+          source,
+          targetW,
+          targetH,
+          framing,
+          logoAsset,
+          now - startTs
+        );
+      }
+      rafId = requestAnimationFrame(tick);
+    };
+
+    rafId = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(rafId);
   }, [visible, minimized, source, logoAsset, preset, framing]);
 
   if (!visible) return null;

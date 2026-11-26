@@ -114,8 +114,8 @@ export async function buildBatchZipArchive(
   );
   const archiveName = safePrefix
     ? `${safePrefix}_${total}-images.zip`
-    : sharedFraming.outputFormat === 'png'
-    ? `${preset.filenameSuffix}_png_${total}-images.zip`
+    : sharedFraming.outputFormat === 'png' || sharedFraming.outputFormat === 'gif'
+    ? `${preset.filenameSuffix}_${extTag}_${total}-images.zip`
     : `${preset.filenameSuffix}_${extTag}-q${qualityInt}_${total}-images.zip`;
 
   return {

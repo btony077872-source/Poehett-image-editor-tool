@@ -255,14 +255,47 @@ export function FramingStage({
     setIsZoomingHud(false);
   }, [framing.zoom, framing.offsetX, framing.offsetY]);
 
-  // Render live interactive preview canvas at crisp display resolution
+  // Render live interactive preview canvas (with smooth animated GIF loop when active)
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas || !source) return;
-    if (zoomAnimRef.current.animating) return;
 
     const { previewW, previewH } = getPreviewDimensions(preset);
-    renderFramedCanvas(canvas, source, previewW, previewH, framing, logoAsset);
+    const hasAnimatedLogo =
+      Boolean(logoAsset) &&
+      framing.logoWatermark.enabled &&
+      (framing.logoWatermark.gifMotion !== 'none' || Boolean(logoAsset?.isAnimatedGif));
+
+    if (!zoomAnimRef.current.animating) {
+      renderFramedCanvas(canvas, source, previewW, previewH, framing, logoAsset, 0);
+    }
+
+    if (!hasAnimatedLogo || prefersReducedMotion()) return;
+
+    let rafId = 0;
+    const startTs = performance.now();
+    let lastDrawTs = 0;
+
+    const tick = (now: number) => {
+      if (!zoomAnimRef.current.animating && now - lastDrawTs >= 40) {
+        lastDrawTs = now;
+        renderFramedCanvas(
+          canvas,
+          source,
+          previewW,
+          previewH,
+          framing,
+          logoAsset,
+          now - startTs
+        );
+      }
+      rafId = requestAnimationFrame(tick);
+    };
+
+    rafId = requestAnimationFrame(tick);
+    return () => {
+      cancelAnimationFrame(rafId);
+    };
   }, [source, preset, framing, logoAsset]);
 
   // Clean up any active rAF or HUD timer on unmount
@@ -469,7 +502,8 @@ export function FramingStage({
         previewW,
         previewH,
         frameSnapshot,
-        latestLogoRef.current
+        latestLogoRef.current,
+        now
       );
 
       setHudZoom(nextZoom);
@@ -1214,9 +1248,11 @@ export function FramingStage({
                   <span aria-hidden="true">·</span>
                   <span>
                     {preset.shortName} ({preset.ratioLabel}) · {outputShortLabel}
-                    {framing.outputFormat !== 'png'
-                      ? ` Q${Math.round(framing.quality * 100)}`
-                      : ' Lossless'}
+                    {framing.outputFormat === 'png'
+                      ? ' Lossless'
+                      : framing.outputFormat === 'gif'
+                      ? ' Loop'
+                      : ` Q${Math.round(framing.quality * 100)}`}
                   </span>
                 </div>
                 <button
@@ -1397,7 +1433,10 @@ export function FramingStage({
                   <>
                     <span aria-hidden="true">·</span>
                     <span className="font-mono text-[11px] text-[#4A3628] whitespace-nowrap">
-                      Logo{framing.logoWatermark.bgRemoval.enabled ? ' (cutout)' : ''}
+                      {framing.logoWatermark.gifMotion !== 'none' || logoAsset.isAnimatedGif
+                        ? `Logo GIF (${framing.logoWatermark.gifMotion})`
+                        : 'Logo'}
+                      {framing.logoWatermark.bgRemoval.enabled ? ' (cutout)' : ''}
                     </span>
                   </>
                 )}

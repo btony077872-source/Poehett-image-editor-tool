@@ -612,22 +612,29 @@ function applyAlphaEdgeTrim(data: Uint8ClampedArray, w: number, h: number, passe
 }
 
 /**
- * Returns a cached, background-removed HTMLCanvasElement for the given image
- * and removal configuration, suitable for crisp live preview and export.
+ * Returns a cached, background-removed HTMLCanvasElement for any image or canvas frame
+ * and removal configuration, suitable for crisp live preview and animated GIF export.
  */
-export function getProcessedBgRemovedCanvas(
-  img: HTMLImageElement,
+export function getProcessedBgRemovedCanvasFromSource(
+  source: HTMLImageElement | HTMLCanvasElement,
+  sourceKey: string,
   config: BgRemovalConfig,
   maxWorkingDim = 1600
 ): HTMLCanvasElement {
-  const natW = Math.max(1, img.naturalWidth || 512);
-  const natH = Math.max(1, img.naturalHeight || 512);
+  const natW =
+    source instanceof HTMLCanvasElement
+      ? Math.max(1, source.width)
+      : Math.max(1, source.naturalWidth || 512);
+  const natH =
+    source instanceof HTMLCanvasElement
+      ? Math.max(1, source.height)
+      : Math.max(1, source.naturalHeight || 512);
   const scale = Math.min(1, maxWorkingDim / Math.max(natW, natH));
   const w = Math.max(1, Math.round(natW * scale));
   const h = Math.max(1, Math.round(natH * scale));
 
   const cacheKey = [
-    img.src,
+    sourceKey,
     w,
     h,
     config.mode,
@@ -654,7 +661,7 @@ export function getProcessedBgRemovedCanvas(
   if (!ctx) return canvas;
 
   ctx.clearRect(0, 0, w, h);
-  ctx.drawImage(img, 0, 0, w, h);
+  ctx.drawImage(source, 0, 0, w, h);
 
   const imageData = ctx.getImageData(0, 0, w, h);
   const { data } = imageData;
@@ -692,4 +699,16 @@ export function getProcessedBgRemovedCanvas(
   }
   processedCache.set(cacheKey, { key: cacheKey, canvas });
   return canvas;
+}
+
+/**
+ * Returns a cached, background-removed HTMLCanvasElement for the given image
+ * and removal configuration, suitable for crisp live preview and export.
+ */
+export function getProcessedBgRemovedCanvas(
+  img: HTMLImageElement,
+  config: BgRemovalConfig,
+  maxWorkingDim = 1600
+): HTMLCanvasElement {
+  return getProcessedBgRemovedCanvasFromSource(img, img.src, config, maxWorkingDim);
 }

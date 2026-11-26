@@ -1,8 +1,10 @@
 import React, { useRef, useState } from 'react';
-import { ChevronDown, ChevronUp, ImagePlus, Stamp, Trash2, Type } from 'lucide-react';
+import { ChevronDown, ChevronUp, Download, Film, ImagePlus, Stamp, Trash2, Type } from 'lucide-react';
 import {
   BgRemovalConfig,
   FramingState,
+  LogoGifMotion,
+  LogoGifSpeed,
   LogoWatermarkAsset,
   LogoWatermarkState,
   SourceAsset,
@@ -22,6 +24,8 @@ interface LayersPanelProps {
   onSelectLogoFile: (file: File) => void;
   onClearLogo: () => void;
   onUseMascotLogo: () => void;
+  onExportLogoGif: () => void;
+  isExportingLogoGif?: boolean;
 }
 
 const TEXT_SWATCHES = ['#FFFFFF', '#2B1E16', '#F59E0B', '#EF4444', '#10B981', '#0F172A'];
@@ -108,6 +112,21 @@ const TEXT_STYLE_PRESETS: {
   },
 ];
 
+const GIF_MOTION_OPTIONS: { id: LogoGifMotion; label: string }[] = [
+  { id: 'pulse', label: 'Pulse' },
+  { id: 'float', label: 'Float' },
+  { id: 'wiggle', label: 'Wiggle' },
+  { id: 'spin', label: 'Spin' },
+  { id: 'orbit', label: 'Orbit' },
+  { id: 'shimmer', label: 'Shimmer' },
+];
+
+const GIF_SPEED_OPTIONS: { id: LogoGifSpeed; label: string }[] = [
+  { id: 'slow', label: 'Slow' },
+  { id: 'normal', label: 'Normal' },
+  { id: 'fast', label: 'Fast' },
+];
+
 export function LayersPanel({
   idPrefix,
   embedded = false,
@@ -118,6 +137,8 @@ export function LayersPanel({
   onSelectLogoFile,
   onClearLogo,
   onUseMascotLogo,
+  onExportLogoGif,
+  isExportingLogoGif = false,
 }: LayersPanelProps) {
   const logoInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -465,6 +486,161 @@ export function LayersPanel({
                           className="studio-slider w-full"
                         />
                       </div>
+                    </div>
+
+                    {/* Animated GIF Watermark Generator Controls */}
+                    <div className="border-t border-[#E4D7C3] pt-3 space-y-2.5">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="min-w-0">
+                          <p className="flex items-center gap-1.5 text-xs font-semibold text-[#2B1E16]">
+                            <Film className="h-3.5 w-3.5 shrink-0 text-[#C25E00]" aria-hidden="true" />
+                            <span>Animated GIF Watermark</span>
+                          </p>
+                          <p className="text-[11px] text-[#6E5849]">
+                            {logoAsset.isAnimatedGif
+                              ? `${logoAsset.gifFrames?.length ?? 0} GIF frames ready`
+                              : framing.logoWatermark.gifMotion !== 'none'
+                              ? `Motion · ${framing.logoWatermark.gifMotion}`
+                              : 'Turn logo into a looping GIF watermark'}
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          role="switch"
+                          aria-checked={framing.logoWatermark.gifMotion !== 'none'}
+                          aria-label="Toggle animated GIF logo watermark"
+                          onClick={() => {
+                            const isActive = framing.logoWatermark.gifMotion !== 'none';
+                            updateLogo({
+                              gifMotion: isActive
+                                ? 'none'
+                                : logoAsset.isAnimatedGif
+                                ? 'gif-frames'
+                                : 'pulse',
+                            });
+                          }}
+                          className={`relative inline-flex h-7 w-12 shrink-0 items-center rounded-full transition-colors duration-150 lg:h-6 lg:w-11 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#C25E00] ${
+                            framing.logoWatermark.gifMotion !== 'none'
+                              ? 'bg-[#C25E00]'
+                              : 'bg-[#D8C7AE]'
+                          }`}
+                        >
+                          <span
+                            aria-hidden="true"
+                            className={`inline-block h-5 w-5 transform rounded-full bg-white shadow-xs transition-transform duration-150 lg:h-4.5 lg:w-4.5 ${
+                              framing.logoWatermark.gifMotion !== 'none'
+                                ? 'translate-x-6 lg:translate-x-5.5'
+                                : 'translate-x-1 lg:translate-x-0.5'
+                            }`}
+                          />
+                        </button>
+                      </div>
+
+                      {framing.logoWatermark.gifMotion !== 'none' && (
+                        <>
+                          <div>
+                            <p className="mb-1 text-[11px] font-medium text-[#4A3628]">
+                              GIF Motion Style
+                            </p>
+                            <div className="grid grid-cols-3 gap-1">
+                              {logoAsset.isAnimatedGif && (
+                                <button
+                                  type="button"
+                                  onClick={() => updateLogo({ gifMotion: 'gif-frames' })}
+                                  className={`col-span-3 rounded-md border px-2 py-1 text-[11px] font-medium transition-colors whitespace-nowrap ${
+                                    framing.logoWatermark.gifMotion === 'gif-frames'
+                                      ? 'border-[#D97706] bg-[#D97706]/12 text-[#2B1E16]'
+                                      : 'border-[#E4D7C3] bg-[#FFFDF8] text-[#6E5849] hover:border-[#C25E00]'
+                                  }`}
+                                >
+                                  Original GIF Frames ({logoAsset.gifFrames?.length ?? 0})
+                                </button>
+                              )}
+                              {GIF_MOTION_OPTIONS.map((opt) => {
+                                const active = framing.logoWatermark.gifMotion === opt.id;
+                                return (
+                                  <button
+                                    key={opt.id}
+                                    type="button"
+                                    onClick={() => updateLogo({ gifMotion: opt.id })}
+                                    className={`rounded-md border px-2 py-1 text-[11px] font-medium transition-colors whitespace-nowrap ${
+                                      active
+                                        ? 'border-[#D97706] bg-[#D97706]/12 text-[#2B1E16]'
+                                        : 'border-[#E4D7C3] bg-[#FFFDF8] text-[#6E5849] hover:border-[#C25E00] hover:text-[#2B1E16]'
+                                    }`}
+                                  >
+                                    {opt.label}
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          </div>
+
+                          <div>
+                            <p className="mb-1 text-[11px] font-medium text-[#4A3628]">
+                              Loop Speed
+                            </p>
+                            <div className="grid grid-cols-3 gap-1 rounded-lg bg-[#F3EBDD] p-1">
+                              {GIF_SPEED_OPTIONS.map((sp) => {
+                                const active = framing.logoWatermark.gifSpeed === sp.id;
+                                return (
+                                  <button
+                                    key={sp.id}
+                                    type="button"
+                                    onClick={() => updateLogo({ gifSpeed: sp.id })}
+                                    className={`rounded py-1 text-[11px] font-medium transition-colors whitespace-nowrap ${
+                                      active
+                                        ? 'bg-[#FFFDF8] text-[#2B1E16] shadow-xs'
+                                        : 'text-[#6E5849] hover:text-[#2B1E16]'
+                                    }`}
+                                  >
+                                    {sp.label}
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          </div>
+
+                          <div className="flex flex-col gap-1.5 pt-0.5">
+                            <button
+                              type="button"
+                              disabled={isExportingLogoGif}
+                              onClick={onExportLogoGif}
+                              className="inline-flex min-h-[36px] w-full items-center justify-center gap-1.5 rounded-lg border border-[#CBB89D] bg-[#FAF6EE] px-3 py-1.5 text-xs font-semibold text-[#2B1E16] transition-colors hover:border-[#C25E00] hover:text-[#C25E00] disabled:opacity-55 whitespace-nowrap"
+                            >
+                              <Download className="h-3.5 w-3.5 text-[#C25E00]" aria-hidden="true" />
+                              <span>
+                                {isExportingLogoGif ? 'Creating Logo GIF…' : 'Save Logo as GIF'}
+                              </span>
+                            </button>
+
+                            {source && framing.outputFormat !== 'gif' && (
+                              <button
+                                type="button"
+                                onClick={() => onUpdateFraming({ outputFormat: 'gif' })}
+                                className="inline-flex min-h-[36px] w-full items-center justify-center gap-1.5 rounded-lg bg-[#C25E00] px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-[#A14B00] whitespace-nowrap"
+                              >
+                                <Film className="h-3.5 w-3.5" aria-hidden="true" />
+                                <span>Switch Output to GIF</span>
+                              </button>
+                            )}
+                          </div>
+                        </>
+                      )}
+
+                      {framing.logoWatermark.gifMotion === 'none' && (
+                        <button
+                          type="button"
+                          disabled={isExportingLogoGif}
+                          onClick={onExportLogoGif}
+                          className="inline-flex min-h-[34px] w-full items-center justify-center gap-1.5 rounded-lg border border-[#E4D7C3] bg-[#FFFDF8] px-3 py-1 text-[11px] font-medium text-[#4A3628] transition-colors hover:border-[#C25E00] hover:text-[#2B1E16] disabled:opacity-55 whitespace-nowrap"
+                        >
+                          <Download className="h-3.5 w-3.5 text-[#C25E00]" aria-hidden="true" />
+                          <span>
+                            {isExportingLogoGif ? 'Creating Logo GIF…' : 'Convert Logo to GIF'}
+                          </span>
+                        </button>
+                      )}
                     </div>
                   </>
                 )}

@@ -443,6 +443,9 @@ export const DEFAULT_LOGO_WATERMARK = {
     ...DEFAULT_BG_REMOVAL,
     enabled: false,
   },
+  gifMotion: 'none' as const,
+  gifSpeed: 'normal' as const,
+  gifFps: 12,
 };
 
 export const DEFAULT_TEXT_WATERMARK = {
